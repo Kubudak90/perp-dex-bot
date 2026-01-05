@@ -1,39 +1,41 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // EXTENDED CONNECTOR
-// Starknet-based perpetual DEX connector for Extended.exchange
+// Main connector using REST and WebSocket clients
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { Account, Provider, Contract, RpcProvider, constants } from 'starknet';
-import axios, { AxiosInstance } from 'axios';
 import {
     IExchange,
     ExchangeConfig,
     OrderParams,
-    Balance,
+    Balance as IBalance,
     ExchangeStats,
 } from '../interface';
-import { Candle, MarketData, Position, OrderResult } from '../../types';
+import { Candle, MarketData, Position as IPosition, OrderResult } from '../../types';
+import { ExtendedRestClient } from './rest-client';
+import { ExtendedWebSocketClient } from './websocket-client';
 import {
-    ExtendedOrder,
-    ExtendedPosition,
-    ExtendedPoints,
-    ExtendedResponse,
-    EXTENDED_ENDPOINTS,
-    EXTENDED_CONTRACTS,
+    EXTENDED_MAINNET_CONFIG,
+    EXTENDED_TESTNET_CONFIG,
+    ExtendedConfig,
+    OrderSide,
+    OrderType,
+    TimeInForce,
+    CreateOrderRequest,
+    Balance,
+    Position,
 } from './types';
-import { EXTENDED_CONFIG, EXTENDED_FEES } from './config';
+import { EXTENDED_CONFIG } from './config';
 
 /**
  * Extended Exchange Connector
- * Implements IExchange interface for Extended perpetual DEX
+ * Self-custody perpetual DEX on Starknet
  */
 export class ExtendedConnector implements IExchange {
-    private provider: RpcProvider;
-    private account: Account | null = null;
-    private apiClient: AxiosInstance;
-    private wsConnection: WebSocket | null = null;
-    private connected: boolean = false;
-    private config: ExchangeConfig;
+    private rest: ExtendedRestClient;
+    private ws: ExtendedWebSocketClient | null = null;
+    private config: ExtendedConfig;
+    private apiKey: string;
+    private connected = false;
 
     // Price subscription callbacks
     private priceCallbacks: Map<string, (price: number) => void> = new Map();
@@ -51,63 +53,63 @@ export class ExtendedConnector implements IExchange {
         },
     };
 
-    constructor(config: ExchangeConfig) {
-        this.config = config;
+    constructor(exchangeConfig: ExchangeConfig) {
+        // Select mainnet or testnet config
+        this.config = exchangeConfig.testnet
+            ? EXTENDED_TESTNET_CONFIG
+            : EXTENDED_MAINNET_CONFIG;
 
-        // Initialize Starknet provider
-        const chainId = config.testnet
-            ? constants.StarknetChainId.SN_SEPOLIA
-            : constants.StarknetChainId.SN_MAIN;
+        // API key required
+        if (!process.env.EXTENDED_API_KEY) {
+            throw new Error('EXTENDED_API_KEY environment variable is required');
+        }
+        this.apiKey = process.env.EXTENDED_API_KEY;
 
-        this.provider = new RpcProvider({
-            nodeUrl: config.apiUrl,
-        });
+        // Create REST client
+        this.rest = new ExtendedRestClient(this.config, this.apiKey);
 
-        // Initialize HTTP client
-        const baseURL = config.testnet
-            ? EXTENDED_ENDPOINTS.TESTNET
-            : EXTENDED_ENDPOINTS.MAINNET;
-
-        this.apiClient = axios.create({
-            baseURL,
-            timeout: 30000,
-            headers: {
-                'Content-Type': 'application/json',
-            },
-        });
+        console.log(
+            `✅ Extended connector created (${exchangeConfig.testnet ? 'Testnet' : 'Mainnet'})`
+        );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // CONNECTION MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════════
 
     /**
      * Connect to Extended exchange
      */
     async connect(): Promise<void> {
         try {
-            if (!this.config.privateKey) {
-                throw new Error('Private key is required for Extended connector');
-            }
+            console.log('🔌 Connecting to Extended...');
 
-            // Create Starknet account
-            const contractAddress = this.config.testnet
-                ? EXTENDED_CONTRACTS.TESTNET.CLEARINGHOUSE
-                : EXTENDED_CONTRACTS.MAINNET.CLEARINGHOUSE;
+            // Test REST connection by fetching account info
+            const accountInfo = await this.rest.getAccountInfo();
+            console.log(`✅ Account connected: ${accountInfo.starkKey}`);
 
-            // Note: In production, derive address from private key
-            // For now, using placeholder
-            const accountAddress = '0x...'; // TODO: Derive from private key
-
-            this.account = new Account(
-                this.provider,
-                accountAddress,
-                this.config.privateKey
-            );
-
-            // Test connection
-            const balance = await this.getBalance();
-            console.log(`✅ Connected to Extended (${this.config.testnet ? 'Testnet' : 'Mainnet'})`);
-            console.log(`💰 Balance: $${balance.available.toFixed(2)}`);
+            // Initialize WebSocket
+            this.ws = new ExtendedWebSocketClient(this.config, this.apiKey, {
+                onConnect: () => console.log('✅ WebSocket connected'),
+                onDisconnect: () => console.log('🔌 WebSocket disconnected'),
+                onError: (error) => console.error('❌ WebSocket error:', error),
+                onAccountUpdate: (update) => {
+                    console.log(`📊 Account update: ${update.type}`);
+                },
+                onMarkPrice: (market, data) => {
+                    const callback = this.priceCallbacks.get(market);
+                    if (callback) {
+                        callback(parseFloat(data.price));
+                    }
+                },
+            });
 
             // Connect WebSocket
-            await this.connectWebSocket();
+            this.ws.connect();
+
+            // Get initial balance
+            const balance = await this.getBalance();
+            console.log(`💰 Balance: $${balance.available.toFixed(2)}`);
 
             this.connected = true;
         } catch (error) {
@@ -120,9 +122,9 @@ export class ExtendedConnector implements IExchange {
      * Disconnect from Extended
      */
     async disconnect(): Promise<void> {
-        if (this.wsConnection) {
-            this.wsConnection.close();
-            this.wsConnection = null;
+        if (this.ws) {
+            this.ws.disconnect();
+            this.ws = null;
         }
 
         this.connected = false;
@@ -136,8 +138,12 @@ export class ExtendedConnector implements IExchange {
         return this.connected;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // MARKET DATA
+    // ═══════════════════════════════════════════════════════════════════════
+
     /**
-     * Get historical candle data
+     * Get historical candles
      */
     async getCandles(
         symbol: string,
@@ -145,19 +151,17 @@ export class ExtendedConnector implements IExchange {
         limit: number = 500
     ): Promise<Candle[]> {
         try {
-            const response = await this.apiClient.get<ExtendedResponse<any>>('/v1/candles', {
-                params: {
-                    symbol: this.normalizeSymbol(symbol),
-                    interval: this.normalizeTimeframe(timeframe),
-                    limit,
-                },
-            });
+            const market = this.normalizeSymbol(symbol);
+            const interval = this.normalizeTimeframe(timeframe);
 
-            if (!response.data.success || !response.data.data) {
-                throw new Error(response.data.error?.message || 'Failed to fetch candles');
-            }
+            const candles = await this.rest.getCandles(
+                market,
+                'trades',
+                interval,
+                limit
+            );
 
-            return response.data.data.map((c: any) => ({
+            return candles.map((c) => ({
                 timestamp: c.timestamp,
                 open: parseFloat(c.open),
                 high: parseFloat(c.high),
@@ -176,22 +180,16 @@ export class ExtendedConnector implements IExchange {
      */
     async getMarketData(symbol: string): Promise<MarketData> {
         try {
-            const response = await this.apiClient.get<ExtendedResponse<any>>(
-                `/v1/markets/${this.normalizeSymbol(symbol)}`
-            );
+            const market = this.normalizeSymbol(symbol);
+            const stats = await this.rest.getMarketStats(market);
 
-            if (!response.data.success || !response.data.data) {
-                throw new Error(response.data.error?.message || 'Failed to fetch market data');
-            }
-
-            const data = response.data.data;
             return {
                 symbol,
-                markPrice: parseFloat(data.markPrice),
-                indexPrice: parseFloat(data.indexPrice),
-                fundingRate: parseFloat(data.fundingRate),
-                openInterest: parseFloat(data.openInterest),
-                volume24h: parseFloat(data.volume24h),
+                markPrice: parseFloat(stats.close),
+                indexPrice: parseFloat(stats.close), // TODO: Get actual index price
+                fundingRate: parseFloat(stats.fundingRate),
+                openInterest: parseFloat(stats.openInterest),
+                volume24h: parseFloat(stats.volumeQuote),
             };
         } catch (error) {
             console.error('❌ Failed to fetch market data:', error);
@@ -199,29 +197,22 @@ export class ExtendedConnector implements IExchange {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ACCOUNT & POSITIONS
+    // ═══════════════════════════════════════════════════════════════════════
+
     /**
      * Get account balance
      */
-    async getBalance(): Promise<Balance> {
+    async getBalance(): Promise<IBalance> {
         try {
-            if (!this.account) {
-                throw new Error('Not connected');
-            }
+            const balance: Balance = await this.rest.getBalance();
 
-            const response = await this.apiClient.get<ExtendedResponse<any>>(
-                `/v1/account/${this.account.address}`
-            );
-
-            if (!response.data.success || !response.data.data) {
-                throw new Error(response.data.error?.message || 'Failed to fetch balance');
-            }
-
-            const data = response.data.data;
             return {
-                total: parseFloat(data.balance),
-                available: parseFloat(data.availableBalance),
-                locked: parseFloat(data.marginUsed),
-                unrealizedPnl: parseFloat(data.unrealizedPnl),
+                total: parseFloat(balance.equity),
+                available: parseFloat(balance.availableForTrade),
+                locked: parseFloat(balance.totalPositionValue),
+                unrealizedPnl: parseFloat(balance.unrealizedPnl),
             };
         } catch (error) {
             console.error('❌ Failed to fetch balance:', error);
@@ -232,28 +223,18 @@ export class ExtendedConnector implements IExchange {
     /**
      * Get current positions
      */
-    async getPositions(): Promise<Position[]> {
+    async getPositions(): Promise<IPosition[]> {
         try {
-            if (!this.account) {
-                throw new Error('Not connected');
-            }
+            const positions: Position[] = await this.rest.getPositions();
 
-            const response = await this.apiClient.get<ExtendedResponse<ExtendedPosition[]>>(
-                `/v1/positions/${this.account.address}`
-            );
-
-            if (!response.data.success || !response.data.data) {
-                throw new Error(response.data.error?.message || 'Failed to fetch positions');
-            }
-
-            return response.data.data.map((p) => ({
+            return positions.map((p) => ({
                 side: p.side,
-                entryPrice: p.entryPrice,
-                size: p.size,
-                stopLoss: 0, // TODO: Fetch from orders
-                takeProfit: 0, // TODO: Fetch from orders
+                entryPrice: parseFloat(p.entryPrice),
+                size: parseFloat(p.size),
+                stopLoss: 0, // TODO: Get from conditional orders
+                takeProfit: 0, // TODO: Get from conditional orders
                 entryTime: Date.now(), // TODO: Get actual entry time
-                unrealizedPnl: p.unrealizedPnl,
+                unrealizedPnl: parseFloat(p.unrealizedPnl),
             }));
         } catch (error) {
             console.error('❌ Failed to fetch positions:', error);
@@ -261,64 +242,83 @@ export class ExtendedConnector implements IExchange {
         }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // ORDER MANAGEMENT
+    // ═══════════════════════════════════════════════════════════════════════
+
     /**
      * Open a new position
+     * NOTE: Order signing not implemented - requires Python SDK or starknet.js
      */
     async openPosition(params: OrderParams): Promise<OrderResult> {
         try {
-            if (!this.account) {
-                throw new Error('Not connected');
+            console.log(`📈 Opening ${params.side} position: ${params.symbol}`);
+
+            const market = this.normalizeSymbol(params.symbol);
+            const side = params.side === 'LONG' ? OrderSide.BUY : OrderSide.SELL;
+
+            // Market order = IOC limit at best price + 0.75% margin
+            let price: string | undefined;
+            if (!params.price) {
+                const orderbook = await this.rest.getOrderBook(market);
+                const bestPrice =
+                    side === OrderSide.BUY
+                        ? parseFloat(orderbook.asks[0]?.price || '0')
+                        : parseFloat(orderbook.bids[0]?.price || '0');
+                price = (bestPrice * (side === OrderSide.BUY ? 1.0075 : 0.9925)).toFixed(2);
+            } else {
+                price = params.price.toString();
             }
 
-            console.log(`📈 Opening ${params.side} position: ${params.symbol} @ ${params.size}`);
-
-            // Prepare order data
-            const orderData = {
-                symbol: this.normalizeSymbol(params.symbol),
-                side: params.side === 'LONG' ? 'BUY' : 'SELL',
-                type: params.price ? 'LIMIT' : 'MARKET',
-                size: params.size,
-                price: params.price,
-                timeInForce: params.timeInForce || 'GTC',
+            const orderRequest: CreateOrderRequest = {
+                market,
+                side,
+                type: OrderType.LIMIT,
+                size: params.size.toString(),
+                price,
+                timeInForce: params.price ? TimeInForce.GTT : TimeInForce.IOC,
+                expiryEpochMillis: params.price
+                    ? Date.now() + 7 * 24 * 60 * 60 * 1000 // 7 days for limit
+                    : Date.now() + 60 * 1000, // 1 min for market
+                reduceOnly: params.reduceOnly || false,
+                postOnly: params.price ? true : false, // Maker orders for limits
+                selfTradeProtection: 'ACCOUNT',
             };
 
-            // Sign and submit order
-            const response = await this.apiClient.post<ExtendedResponse<ExtendedOrder>>(
-                '/v1/orders',
-                orderData,
-                {
-                    headers: {
-                        'X-Account-Address': this.account.address,
-                        // TODO: Add signature header
-                    },
-                }
-            );
+            // Add TP/SL if specified
+            if (params.takeProfit || params.stopLoss) {
+                orderRequest.tpslType = 'ORDER';
 
-            if (!response.data.success || !response.data.data) {
-                throw new Error(response.data.error?.message || 'Failed to open position');
+                if (params.takeProfit) {
+                    orderRequest.takeProfit = {
+                        triggerPrice: params.takeProfit.toString(),
+                        triggerPriceType: 'LAST',
+                        priceType: 'LIMIT',
+                    };
+                }
+
+                if (params.stopLoss) {
+                    orderRequest.stopLoss = {
+                        triggerPrice: params.stopLoss.toString(),
+                        triggerPriceType: 'LAST',
+                        priceType: 'LIMIT',
+                    };
+                }
             }
 
-            const order = response.data.data;
+            // NOTE: This will fail without proper Stark signature
+            // You need to implement signing with Python SDK or starknet.js
+            const response = await this.rest.createOrder(orderRequest);
 
             // Update stats
-            this.updateStats(order);
+            this.updateStats(response.order, parseFloat(price));
 
-            // Place stop loss order if specified
-            if (params.stopLoss) {
-                await this.placeStopOrder(params.symbol, params.stopLoss, params.size, true);
-            }
-
-            // Place take profit order if specified
-            if (params.takeProfit) {
-                await this.placeStopOrder(params.symbol, params.takeProfit, params.size, false);
-            }
-
-            console.log(`✅ Position opened: ${order.orderId} @ $${order.avgPrice}`);
+            console.log(`✅ Order placed: ${response.order.id}`);
 
             return {
-                orderId: order.orderId,
-                avgPrice: order.avgPrice,
-                filledSize: order.filledSize,
+                orderId: response.order.id.toString(),
+                avgPrice: parseFloat(response.order.avgFillPrice || price),
+                filledSize: parseFloat(response.order.filledSize),
                 status: 'filled',
             };
         } catch (error) {
@@ -332,13 +332,8 @@ export class ExtendedConnector implements IExchange {
      */
     async closePosition(symbol: string, size?: number): Promise<OrderResult> {
         try {
-            if (!this.account) {
-                throw new Error('Not connected');
-            }
-
             console.log(`📉 Closing position: ${symbol}`);
 
-            // Get current position to determine side
             const positions = await this.getPositions();
             const position = positions.find((p) => p.side !== undefined);
 
@@ -350,16 +345,12 @@ export class ExtendedConnector implements IExchange {
             const closeSide = position.side === 'LONG' ? 'SHORT' : 'LONG';
             const closeSize = size || position.size;
 
-            const result = await this.openPosition({
+            return await this.openPosition({
                 symbol,
                 side: closeSide,
                 size: closeSize,
                 reduceOnly: true,
             });
-
-            console.log(`✅ Position closed: ${result.orderId}`);
-
-            return result;
         } catch (error) {
             console.error('❌ Failed to close position:', error);
             throw error;
@@ -374,72 +365,61 @@ export class ExtendedConnector implements IExchange {
         stopLoss?: number,
         takeProfit?: number
     ): Promise<void> {
-        try {
-            // Cancel existing SL/TP orders
-            // TODO: Implement order cancellation
-
-            // Place new SL/TP orders
-            const positions = await this.getPositions();
-            const position = positions.find((p) => p.side !== undefined);
-
-            if (!position) {
-                throw new Error('No position found');
-            }
-
-            if (stopLoss) {
-                await this.placeStopOrder(symbol, stopLoss, position.size, true);
-            }
-
-            if (takeProfit) {
-                await this.placeStopOrder(symbol, takeProfit, position.size, false);
-            }
-
-            console.log(`✅ Position updated: SL=${stopLoss}, TP=${takeProfit}`);
-        } catch (error) {
-            console.error('❌ Failed to update position:', error);
-            throw error;
-        }
+        console.warn('⚠️  updatePosition not fully implemented for Extended');
+        // TODO: Cancel existing TPSL orders and create new ones
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // STATISTICS
+    // ═══════════════════════════════════════════════════════════════════════
 
     /**
      * Get trading statistics
      */
     async getStats(): Promise<ExchangeStats> {
-        try {
-            // Fetch points data
-            const points = await this.getPoints();
-
-            return {
-                totalTrades: this.stats.totalTrades,
-                totalVolume: this.stats.totalVolume,
-                points: points.totalPoints,
-                makerTrades: this.stats.makerTrades,
-                takerTrades: this.stats.takerTrades,
-                fees: this.stats.fees,
-            };
-        } catch (error) {
-            console.error('❌ Failed to fetch stats:', error);
-            return {
-                ...this.stats,
-                points: 0,
-            };
-        }
+        return {
+            totalTrades: this.stats.totalTrades,
+            totalVolume: this.stats.totalVolume,
+            makerTrades: this.stats.makerTrades,
+            takerTrades: this.stats.takerTrades,
+            fees: this.stats.fees,
+            points: 0, // TODO: Fetch from Extended API when available
+        };
     }
 
     /**
-     * Subscribe to real-time price updates
+     * Update internal stats
+     */
+    private updateStats(order: any, price: number): void {
+        this.stats.totalTrades++;
+        const volume = parseFloat(order.size) * price;
+        this.stats.totalVolume += volume;
+
+        const isMaker = order.postOnly || order.timeInForce === 'GTT';
+        if (isMaker) {
+            this.stats.makerTrades++;
+            this.stats.fees.maker += volume * EXTENDED_CONFIG.fees.maker;
+        } else {
+            this.stats.takerTrades++;
+            this.stats.fees.taker += volume * EXTENDED_CONFIG.fees.taker;
+        }
+
+        this.stats.fees.total = this.stats.fees.maker + this.stats.fees.taker;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REAL-TIME PRICE UPDATES
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /**
+     * Subscribe to price updates
      */
     async subscribeToPrice(symbol: string, callback: (price: number) => void): Promise<void> {
-        this.priceCallbacks.set(symbol, callback);
+        const market = this.normalizeSymbol(symbol);
+        this.priceCallbacks.set(market, callback);
 
-        if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
-            this.wsConnection.send(
-                JSON.stringify({
-                    action: 'subscribe',
-                    channel: 'price',
-                    symbol: this.normalizeSymbol(symbol),
-                })
-            );
+        if (this.ws?.isConnected()) {
+            this.ws.subscribeMarkPrice(market);
         }
     }
 
@@ -447,143 +427,56 @@ export class ExtendedConnector implements IExchange {
      * Unsubscribe from price updates
      */
     async unsubscribeFromPrice(symbol: string): Promise<void> {
-        this.priceCallbacks.delete(symbol);
-
-        if (this.wsConnection && this.wsConnection.readyState === WebSocket.OPEN) {
-            this.wsConnection.send(
-                JSON.stringify({
-                    action: 'unsubscribe',
-                    channel: 'price',
-                    symbol: this.normalizeSymbol(symbol),
-                })
-            );
-        }
+        const market = this.normalizeSymbol(symbol);
+        this.priceCallbacks.delete(market);
+        // TODO: Unsubscribe from WebSocket
     }
 
     // ═══════════════════════════════════════════════════════════════════════
-    // PRIVATE HELPER METHODS
+    // UTILITY METHODS
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Connect to WebSocket
-     */
-    private async connectWebSocket(): Promise<void> {
-        const wsUrl = this.config.testnet
-            ? EXTENDED_ENDPOINTS.WS_TESTNET
-            : EXTENDED_ENDPOINTS.WS_MAINNET;
-
-        this.wsConnection = new WebSocket(wsUrl);
-
-        this.wsConnection.onopen = () => {
-            console.log('🔌 WebSocket connected');
-        };
-
-        this.wsConnection.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                this.handleWebSocketMessage(message);
-            } catch (error) {
-                console.error('❌ Failed to parse WebSocket message:', error);
-            }
-        };
-
-        this.wsConnection.onerror = (error) => {
-            console.error('❌ WebSocket error:', error);
-        };
-
-        this.wsConnection.onclose = () => {
-            console.log('🔌 WebSocket disconnected');
-            // Attempt reconnection after 5 seconds
-            setTimeout(() => this.connectWebSocket(), 5000);
-        };
-    }
-
-    /**
-     * Handle WebSocket messages
-     */
-    private handleWebSocketMessage(message: any): void {
-        if (message.type === 'price' && message.symbol) {
-            const callback = this.priceCallbacks.get(message.symbol);
-            if (callback && message.data?.price) {
-                callback(parseFloat(message.data.price));
-            }
-        }
-    }
-
-    /**
-     * Place stop order (SL or TP)
-     */
-    private async placeStopOrder(
-        symbol: string,
-        price: number,
-        size: number,
-        isStopLoss: boolean
-    ): Promise<void> {
-        // TODO: Implement stop order placement
-        // Extended might use a different mechanism for SL/TP
-        console.log(`📋 Placing ${isStopLoss ? 'SL' : 'TP'} order: ${symbol} @ $${price}`);
-    }
-
-    /**
-     * Update trading statistics
-     */
-    private updateStats(order: ExtendedOrder): void {
-        this.stats.totalTrades++;
-        this.stats.totalVolume += order.size * order.avgPrice;
-
-        const isMaker = order.type === 'LIMIT';
-        if (isMaker) {
-            this.stats.makerTrades++;
-            this.stats.fees.maker += order.size * order.avgPrice * EXTENDED_FEES.maker;
-        } else {
-            this.stats.takerTrades++;
-            this.stats.fees.taker += order.size * order.avgPrice * EXTENDED_FEES.taker;
-        }
-
-        this.stats.fees.total = this.stats.fees.maker + this.stats.fees.taker;
-    }
-
-    /**
-     * Get Extended points/rewards
-     */
-    private async getPoints(): Promise<ExtendedPoints> {
-        try {
-            if (!this.account) {
-                throw new Error('Not connected');
-            }
-
-            const response = await this.apiClient.get<ExtendedResponse<ExtendedPoints>>(
-                `/v1/points/${this.account.address}`
-            );
-
-            if (!response.data.success || !response.data.data) {
-                throw new Error('Failed to fetch points');
-            }
-
-            return response.data.data;
-        } catch (error) {
-            console.error('❌ Failed to fetch points:', error);
-            return {
-                totalPoints: 0,
-                tradingPoints: 0,
-                liquidityPoints: 0,
-                referralPoints: 0,
-                season: 1,
-            };
-        }
-    }
-
-    /**
-     * Normalize symbol format (BTC-USD -> BTCUSD)
+     * Normalize symbol (BTC-USD -> BTCUSD or BTC-USD depending on API)
      */
     private normalizeSymbol(symbol: string): string {
-        return symbol.replace('-', '');
+        // Extended uses BTC-USD format
+        return symbol;
     }
 
     /**
-     * Normalize timeframe format (15m -> 15)
+     * Normalize timeframe (15m -> 15)
      */
     private normalizeTimeframe(timeframe: string): string {
-        return timeframe.replace('m', '').replace('h', '');
+        // Extended accepts: 1, 5, 15, 30, 60, 120, 240, 360, 720, D, W
+        const map: Record<string, string> = {
+            '1m': '1',
+            '5m': '5',
+            '15m': '15',
+            '30m': '30',
+            '1h': '60',
+            '2h': '120',
+            '4h': '240',
+            '6h': '360',
+            '12h': '720',
+            '1d': 'D',
+            '1w': 'W',
+        };
+
+        return map[timeframe] || timeframe;
+    }
+
+    /**
+     * Get REST client (for advanced usage)
+     */
+    getRestClient(): ExtendedRestClient {
+        return this.rest;
+    }
+
+    /**
+     * Get WebSocket client (for advanced usage)
+     */
+    getWebSocketClient(): ExtendedWebSocketClient | null {
+        return this.ws;
     }
 }

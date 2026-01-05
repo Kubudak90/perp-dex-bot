@@ -16,14 +16,25 @@ async function testExtendedConnector() {
     console.log('╚═══════════════════════════════════════════════════════════════════════╝\n');
 
     try {
-        // Step 1: Create connector
+        // Step 1: Check API key
+        if (!process.env.EXTENDED_API_KEY) {
+            console.log('⚠️  EXTENDED_API_KEY not set in environment');
+            console.log('📝 This is a configuration test - showing connector structure\n');
+        }
+
+        // Step 2: Set placeholder API key for demo
+        if (!process.env.EXTENDED_API_KEY) {
+            process.env.EXTENDED_API_KEY = 'demo-api-key-placeholder';
+        }
+
+        // Step 3: Create connector
         console.log('🔧 Creating Extended connector...');
         const connector = ExchangeFactory.create(
             ExchangePlatform.EXTENDED,
             {
                 apiUrl: 'https://starknet-sepolia.public.blastapi.io',
                 testnet: true,
-                privateKey: process.env.STARKNET_PRIVATE_KEY || '0x1234', // Placeholder for now
+                privateKey: process.env.STARKNET_PRIVATE_KEY || '0x1234',
             }
         ) as ExtendedConnector;
         console.log('✅ Connector created\n');

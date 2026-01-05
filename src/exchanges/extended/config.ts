@@ -3,13 +3,11 @@
 // Trading parameters and fee structure for Extended exchange
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { ExtendedFees } from './types';
-
 /**
  * Extended Fee Structure
  * Source: https://docs.extended.exchange/fees
  */
-export const EXTENDED_FEES: ExtendedFees = {
+export const EXTENDED_FEES = {
     maker: 0.0002,  // 0.02% - Maker orders (limit orders)
     taker: 0.0005,  // 0.05% - Taker orders (market orders)
 };

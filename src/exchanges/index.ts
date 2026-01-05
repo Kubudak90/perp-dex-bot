@@ -3,8 +3,11 @@
 // Factory for creating exchange connectors
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Export from interface
 export * from './interface';
-export * from './extended';
+
+// Export Extended connector (not all types to avoid conflicts)
+export { ExtendedConnector, ExtendedRestClient, ExtendedWebSocketClient } from './extended';
 
 import { IExchange, ExchangeConfig } from './interface';
 import { ExtendedConnector } from './extended';
