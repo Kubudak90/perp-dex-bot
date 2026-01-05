@@ -11,6 +11,7 @@
         "backtest:v2": "ts-node src/test-backtest-v2.ts",
         "backtest:optimize": "ts-node src/test-backtest-real.ts",
         "fetch-data": "ts-node src/data/fetch-historical.ts",
+        "setup:python": "bash python/setup.sh",
         "test:extended": "ts-node src/test-extended-simple.ts",
         "lint": "eslint src/**/*.ts",
         "clean": "rimraf dist"

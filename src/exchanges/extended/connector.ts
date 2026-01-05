@@ -13,6 +13,7 @@ import {
 import { Candle, MarketData, Position as IPosition, OrderResult } from '../../types';
 import { ExtendedRestClient } from './rest-client';
 import { ExtendedWebSocketClient } from './websocket-client';
+import { PythonBridge } from './python-bridge';
 import {
     EXTENDED_MAINNET_CONFIG,
     EXTENDED_TESTNET_CONFIG,
@@ -33,9 +34,11 @@ import { EXTENDED_CONFIG } from './config';
 export class ExtendedConnector implements IExchange {
     private rest: ExtendedRestClient;
     private ws: ExtendedWebSocketClient | null = null;
+    private pythonBridge: PythonBridge | null = null;
     private config: ExtendedConfig;
     private apiKey: string;
     private connected = false;
+    private usePythonSigning: boolean;
 
     // Price subscription callbacks
     private priceCallbacks: Map<string, (price: number) => void> = new Map();
@@ -67,6 +70,27 @@ export class ExtendedConnector implements IExchange {
 
         // Create REST client
         this.rest = new ExtendedRestClient(this.config, this.apiKey);
+
+        // Check if we should use Python signing
+        this.usePythonSigning = !!(
+            process.env.STARKNET_PRIVATE_KEY &&
+            process.env.EXTENDED_VAULT
+        );
+
+        // Create Python bridge if credentials available
+        if (this.usePythonSigning) {
+            this.pythonBridge = new PythonBridge(
+                this.apiKey,
+                process.env.STARKNET_PRIVATE_KEY!,
+                process.env.EXTENDED_VAULT!,
+                exchangeConfig.testnet || false
+            );
+            console.log('🐍 Python bridge enabled for order signing');
+        } else {
+            console.warn(
+                '⚠️  Python signing disabled (STARKNET_PRIVATE_KEY or EXTENDED_VAULT not set)'
+            );
+        }
 
         console.log(
             `✅ Extended connector created (${exchangeConfig.testnet ? 'Testnet' : 'Mainnet'})`
@@ -248,7 +272,7 @@ export class ExtendedConnector implements IExchange {
 
     /**
      * Open a new position
-     * NOTE: Order signing not implemented - requires Python SDK or starknet.js
+     * Uses Python SDK for order signing if configured
      */
     async openPosition(params: OrderParams): Promise<OrderResult> {
         try {
@@ -306,9 +330,16 @@ export class ExtendedConnector implements IExchange {
                 }
             }
 
-            // NOTE: This will fail without proper Stark signature
-            // You need to implement signing with Python SDK or starknet.js
-            const response = await this.rest.createOrder(orderRequest);
+            // Use Python bridge for signing if available
+            let response;
+            if (this.pythonBridge) {
+                console.log('🐍 Using Python SDK for order signing...');
+                response = await this.pythonBridge.placeOrder(orderRequest);
+            } else {
+                // Fallback to REST (will fail without signature)
+                console.warn('⚠️  No Python bridge - order will likely fail without signature');
+                response = await this.rest.createOrder(orderRequest);
+            }
 
             // Update stats
             this.updateStats(response.order, parseFloat(price));
