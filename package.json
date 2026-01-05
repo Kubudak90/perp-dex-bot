@@ -1,0 +1,37 @@
+{
+    "name": "perp-dex-bot",
+    "version": "1.0.0",
+    "description": "Supertrend + EMA + ADX + Funding Filter stratejisi ile çalışan perpetual DEX trading botu",
+    "main": "dist/index.js",
+    "scripts": {
+        "dev": "ts-node src/index.ts",
+        "build": "tsc",
+        "start": "node dist/index.js",
+        "backtest": "ts-node src/backtest.ts",
+        "lint": "eslint src/**/*.ts",
+        "clean": "rimraf dist"
+    },
+    "keywords": [
+        "trading-bot",
+        "perpetual",
+        "dex",
+        "hyperliquid",
+        "supertrend",
+        "crypto",
+        "automated-trading"
+    ],
+    "author": "",
+    "license": "MIT",
+    "dependencies": {
+        "dotenv": "^16.3.1"
+    },
+    "devDependencies": {
+        "@types/node": "^20.10.0",
+        "ts-node": "^10.9.2",
+        "typescript": "^5.3.2",
+        "rimraf": "^5.0.5"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
