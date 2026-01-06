@@ -2,63 +2,31 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { formatCurrency, formatPercent, formatNumber } from "@/lib/utils"
-import { Activity, TrendingUp, DollarSign, BarChart3, ArrowUpRight, ArrowDownRight } from "lucide-react"
+import { Activity, TrendingUp, DollarSign, BarChart3, ArrowUpRight, ArrowDownRight, WifiOff } from "lucide-react"
+import { useExtendedData } from "@/lib/hooks/useExtendedData"
 
 export default function Dashboard() {
-  // Mock data - will be replaced with real-time data from Extended connector
-  const mockStats = {
-    equity: 12450.50,
-    dailyPnl: 324.20,
-    dailyPnlPercent: 2.67,
-    totalTrades: 156,
-    winRate: 68.5,
-    activeBots: 2,
-    totalVolume: 1245000,
+  const { data, connected, error, reconnect } = useExtendedData()
+
+  // Use real-time data if available, otherwise show loading state
+  const stats = data?.stats || {
+    totalTrades: 0,
+    winRate: 0,
+    totalPnl: 0,
+    totalVolume: 0,
   }
 
-  const mockPositions = [
-    {
-      market: 'BTC-USD',
-      side: 'LONG',
-      size: 0.05,
-      entryPrice: 62000,
-      markPrice: 62450,
-      pnl: 22.50,
-      pnlPercent: 0.73,
-    },
-    {
-      market: 'ETH-USD',
-      side: 'SHORT',
-      size: 1.2,
-      entryPrice: 3200,
-      markPrice: 3180,
-      pnl: 24.00,
-      pnlPercent: 0.63,
-    },
-  ]
+  const balance = data?.balance || {
+    total: 0,
+    available: 0,
+    margin: 0,
+  }
 
-  const mockTrades = [
-    {
-      id: '1',
-      market: 'BTC-USD',
-      side: 'LONG',
-      size: 0.03,
-      entryPrice: 61500,
-      exitPrice: 62100,
-      pnl: 18.00,
-      time: '10:23:45',
-    },
-    {
-      id: '2',
-      market: 'SOL-USD',
-      side: 'SHORT',
-      size: 50,
-      entryPrice: 142,
-      exitPrice: 140.5,
-      pnl: 75.00,
-      time: '09:15:22',
-    },
-  ]
+  const positions = data?.positions || []
+
+  // Calculate derived stats
+  const dailyPnl = stats.totalPnl
+  const dailyPnlPercent = balance.total > 0 ? (dailyPnl / balance.total) * 100 : 0
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -73,10 +41,20 @@ export default function Dashboard() {
           </div>
           <div className="flex flex-1 items-center justify-between space-x-2 md:justify-end">
             <nav className="flex items-center space-x-6">
-              <div className="flex items-center space-x-2 rounded-full bg-green-500/10 px-3 py-1 text-xs font-medium text-green-500">
-                <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
-                <span>Connected</span>
-              </div>
+              {connected ? (
+                <div className="flex items-center space-x-2 rounded-full bg-green-500/10 px-3 py-1 text-xs font-medium text-green-500">
+                  <div className="h-2 w-2 rounded-full bg-green-500 animate-pulse" />
+                  <span>Connected</span>
+                </div>
+              ) : (
+                <button
+                  onClick={reconnect}
+                  className="flex items-center space-x-2 rounded-full bg-red-500/10 px-3 py-1 text-xs font-medium text-red-500 hover:bg-red-500/20 transition-colors"
+                >
+                  <WifiOff className="h-3 w-3" />
+                  <span>{error || 'Disconnected'} - Click to reconnect</span>
+                </button>
+              )}
             </nav>
           </div>
         </div>
@@ -95,11 +73,11 @@ export default function Dashboard() {
                 <DollarSign className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">{formatCurrency(mockStats.equity)}</div>
+                <div className="text-2xl font-bold">{formatCurrency(balance.total)}</div>
                 <p className="text-xs text-muted-foreground">
-                  <span className={mockStats.dailyPnl >= 0 ? "text-green-500" : "text-red-500"}>
-                    {formatCurrency(mockStats.dailyPnl)} ({formatPercent(mockStats.dailyPnlPercent)})
-                  </span> today
+                  <span className={dailyPnl >= 0 ? "text-green-500" : "text-red-500"}>
+                    {formatCurrency(dailyPnl)} ({formatPercent(dailyPnlPercent)})
+                  </span> total PnL
                 </p>
               </CardContent>
             </Card>
@@ -112,9 +90,9 @@ export default function Dashboard() {
                 <BarChart3 className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">{mockStats.totalTrades}</div>
+                <div className="text-2xl font-bold">{stats.totalTrades}</div>
                 <p className="text-xs text-muted-foreground">
-                  {formatPercent(mockStats.winRate)} win rate
+                  {formatPercent(stats.winRate)} win rate
                 </p>
               </CardContent>
             </Card>
@@ -127,9 +105,9 @@ export default function Dashboard() {
                 <TrendingUp className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">${formatNumber(mockStats.totalVolume / 1000, 0)}K</div>
+                <div className="text-2xl font-bold">${formatNumber(stats.totalVolume / 1000, 0)}K</div>
                 <p className="text-xs text-muted-foreground">
-                  Airdrop points: <span className="text-yellow-500">~2000</span>
+                  Airdrop points: <span className="text-yellow-500">~{Math.floor(stats.totalVolume / 500)}</span>
                 </p>
               </CardContent>
             </Card>
@@ -142,7 +120,7 @@ export default function Dashboard() {
                 <Activity className="h-4 w-4 text-muted-foreground" />
               </CardHeader>
               <CardContent>
-                <div className="text-2xl font-bold">{mockStats.activeBots}</div>
+                <div className="text-2xl font-bold">{connected ? 1 : 0}</div>
                 <p className="text-xs text-muted-foreground">
                   Extended (Testnet)
                 </p>
@@ -157,75 +135,100 @@ export default function Dashboard() {
               <CardHeader>
                 <CardTitle>Open Positions</CardTitle>
                 <CardDescription>
-                  {mockPositions.length} active positions
+                  {positions.length} active positions
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                <div className="space-y-4">
-                  {mockPositions.map((pos, i) => (
-                    <div key={i} className="flex items-center justify-between p-3 rounded-lg border">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium">{pos.market}</span>
-                          <span className={`text-xs px-2 py-0.5 rounded ${
-                            pos.side === 'LONG' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'
-                          }`}>
-                            {pos.side}
-                          </span>
+                {positions.length === 0 ? (
+                  <div className="text-center py-8 text-muted-foreground">
+                    No open positions
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {positions.map((pos, i) => {
+                      const pnlPercent = ((pos.markPrice - pos.entryPrice) / pos.entryPrice) * 100 * (pos.side === 'LONG' ? 1 : -1)
+                      return (
+                        <div key={i} className="flex items-center justify-between p-3 rounded-lg border">
+                          <div className="space-y-1">
+                            <div className="flex items-center gap-2">
+                              <span className="font-medium">{pos.symbol}</span>
+                              <span className={`text-xs px-2 py-0.5 rounded ${
+                                pos.side === 'LONG' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'
+                              }`}>
+                                {pos.side}
+                              </span>
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {pos.size} @ {formatCurrency(pos.entryPrice, 0)}
+                            </div>
+                          </div>
+                          <div className="text-right space-y-1">
+                            <div className={`font-medium ${pos.unrealizedPnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
+                              {pos.unrealizedPnl >= 0 ? '+' : ''}{formatCurrency(pos.unrealizedPnl)}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              {formatPercent(pnlPercent)}
+                            </div>
+                          </div>
                         </div>
-                        <div className="text-xs text-muted-foreground">
-                          {pos.size} @ {formatCurrency(pos.entryPrice, 0)}
-                        </div>
-                      </div>
-                      <div className="text-right space-y-1">
-                        <div className={`font-medium ${pos.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                          {pos.pnl >= 0 ? '+' : ''}{formatCurrency(pos.pnl)}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {formatPercent(pos.pnlPercent)}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                      )
+                    })}
+                  </div>
+                )}
               </CardContent>
             </Card>
 
-            {/* Recent Trades */}
+            {/* Account Summary */}
             <Card>
               <CardHeader>
-                <CardTitle>Recent Trades</CardTitle>
+                <CardTitle>Account Summary</CardTitle>
                 <CardDescription>
-                  Latest executed trades
+                  Margin and balance details
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
-                  {mockTrades.map((trade) => (
-                    <div key={trade.id} className="flex items-center justify-between p-3 rounded-lg border">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium">{trade.market}</span>
-                          {trade.side === 'LONG' ? (
-                            <ArrowUpRight className="h-3 w-3 text-green-500" />
-                          ) : (
-                            <ArrowDownRight className="h-3 w-3 text-red-500" />
-                          )}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {trade.size} @ {formatCurrency(trade.entryPrice, 0)} → {formatCurrency(trade.exitPrice, 0)}
-                        </div>
-                      </div>
-                      <div className="text-right space-y-1">
-                        <div className={`font-medium ${trade.pnl >= 0 ? 'text-green-500' : 'text-red-500'}`}>
-                          {trade.pnl >= 0 ? '+' : ''}{formatCurrency(trade.pnl)}
-                        </div>
-                        <div className="text-xs text-muted-foreground">
-                          {trade.time}
-                        </div>
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">Available Balance</div>
+                      <div className="text-xs text-muted-foreground">
+                        Free for trading
                       </div>
                     </div>
-                  ))}
+                    <div className="text-right">
+                      <div className="font-medium text-green-500">
+                        {formatCurrency(balance.available)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">Margin Used</div>
+                      <div className="text-xs text-muted-foreground">
+                        Locked in positions
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-medium text-orange-500">
+                        {formatCurrency(balance.margin)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between p-3 rounded-lg border">
+                    <div className="space-y-1">
+                      <div className="text-sm font-medium">Total Equity</div>
+                      <div className="text-xs text-muted-foreground">
+                        Available + Margin + Unrealized PnL
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-medium">
+                        {formatCurrency(balance.total)}
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </CardContent>
             </Card>
