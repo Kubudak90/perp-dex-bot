@@ -62,11 +62,12 @@ export class ExtendedConnector implements IExchange {
             ? EXTENDED_TESTNET_CONFIG
             : EXTENDED_MAINNET_CONFIG;
 
-        // API key required
-        if (!process.env.EXTENDED_API_KEY) {
-            throw new Error('EXTENDED_API_KEY environment variable is required');
+        // API key from config or environment
+        this.apiKey = exchangeConfig.apiKey || process.env.EXTENDED_API_KEY || '';
+
+        if (!this.apiKey) {
+            console.warn('⚠️  No API key provided - only public endpoints will work');
         }
-        this.apiKey = process.env.EXTENDED_API_KEY;
 
         // Create REST client
         this.rest = new ExtendedRestClient(this.config, this.apiKey);
@@ -108,32 +109,36 @@ export class ExtendedConnector implements IExchange {
         try {
             console.log('🔌 Connecting to Extended...');
 
-            // Test REST connection by fetching account info
-            const accountInfo = await this.rest.getAccountInfo();
-            console.log(`✅ Account connected: ${accountInfo.starkKey}`);
+            // Test REST connection if API key provided
+            if (this.apiKey) {
+                const accountInfo = await this.rest.getAccountInfo();
+                console.log(`✅ Account connected: ${accountInfo.starkKey}`);
 
-            // Initialize WebSocket
-            this.ws = new ExtendedWebSocketClient(this.config, this.apiKey, {
-                onConnect: () => console.log('✅ WebSocket connected'),
-                onDisconnect: () => console.log('🔌 WebSocket disconnected'),
-                onError: (error) => console.error('❌ WebSocket error:', error),
-                onAccountUpdate: (update) => {
-                    console.log(`📊 Account update: ${update.type}`);
-                },
-                onMarkPrice: (market, data) => {
-                    const callback = this.priceCallbacks.get(market);
-                    if (callback) {
-                        callback(parseFloat(data.price));
-                    }
-                },
-            });
+                // Initialize WebSocket
+                this.ws = new ExtendedWebSocketClient(this.config, this.apiKey, {
+                    onConnect: () => console.log('✅ WebSocket connected'),
+                    onDisconnect: () => console.log('🔌 WebSocket disconnected'),
+                    onError: (error) => console.error('❌ WebSocket error:', error),
+                    onAccountUpdate: (update) => {
+                        console.log(`📊 Account update: ${update.type}`);
+                    },
+                    onMarkPrice: (market, data) => {
+                        const callback = this.priceCallbacks.get(market);
+                        if (callback) {
+                            callback(parseFloat(data.price));
+                        }
+                    },
+                });
 
-            // Connect WebSocket
-            this.ws.connect();
+                // Connect WebSocket
+                this.ws.connect();
 
-            // Get initial balance
-            const balance = await this.getBalance();
-            console.log(`💰 Balance: $${balance.available.toFixed(2)}`);
+                // Get initial balance
+                const balance = await this.getBalance();
+                console.log(`💰 Balance: $${balance.available.toFixed(2)}`);
+            } else {
+                console.log('ℹ️  Connected to Extended (public endpoints only)');
+            }
 
             this.connected = true;
         } catch (error) {
