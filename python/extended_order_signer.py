@@ -16,8 +16,8 @@ try:
     from x10.perpetual.accounts import StarkPerpetualAccount
     from x10.perpetual.orders import OrderSide, OrderType, TimeInForce
     from x10.perpetual.configuration import (
-        STARKNET_MAINNET_CONFIG,
-        STARKNET_SEPOLIA_CONFIG
+        MAINNET_CONFIG,
+        TESTNET_CONFIG
     )
 except ImportError:
     print(json.dumps({
@@ -32,7 +32,7 @@ class ExtendedOrderSigner:
 
     def __init__(self, api_key: str, private_key: str, vault: str, testnet: bool = False):
         """Initialize account with Extended SDK"""
-        self.config = STARKNET_SEPOLIA_CONFIG if testnet else STARKNET_MAINNET_CONFIG
+        self.config = TESTNET_CONFIG if testnet else MAINNET_CONFIG
         self.api_key = api_key
         self.private_key = private_key
         self.vault = vault

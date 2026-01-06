@@ -9,10 +9,18 @@ import { Candle, MarketData, Position, OrderResult } from '../types';
  * Exchange Configuration
  */
 export interface ExchangeConfig {
-    apiUrl: string;
+    apiUrl?: string;
     wsUrl?: string;
     privateKey?: string;
     testnet?: boolean;
+
+    // Extended-specific
+    apiKey?: string;
+    vault?: string;
+    starknetPrivateKey?: string;
+
+    // Hyperliquid-specific
+    walletAddress?: string;
 }
 
 /**

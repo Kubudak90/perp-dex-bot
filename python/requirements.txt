@@ -3,7 +3,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Extended Exchange Python SDK
-x10-python-trading>=1.0.0
+x10-python-trading>=0.4.5
 
 # Additional dependencies (SDK'nın bağımlılıkları)
 requests>=2.31.0
