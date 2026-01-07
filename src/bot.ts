@@ -9,6 +9,7 @@ import { TradingStrategy } from './strategies';
 import { RiskManager } from './risk';
 import { Logger } from './utils/logger';
 import { IExchange } from './utils/exchange';
+import { updateBotState } from './api/bot-stats-server';
 
 export class PerpBot {
     private config: BotConfig;
@@ -128,6 +129,9 @@ export class PerpBot {
 
         // Debug output (every tick)
         this.logger.debug(this.strategy.getStateDebug(indicators));
+
+        // 6. Broadcast state to dashboard
+        updateBotState(this.state);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

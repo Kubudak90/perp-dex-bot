@@ -177,15 +177,15 @@ async function main() {
         console.log(`\nShowing all ${result.trades.length} trades:\n`);
 
         result.trades.forEach((trade, i) => {
-            const entryDate = new Date(trade.entryTime).toISOString().split('T')[0];
-            const exitDate = new Date(trade.exitTime).toISOString().split('T')[0];
-            const duration = ((trade.exitTime - trade.entryTime) / 1000 / 60).toFixed(0);
+            const entryDate = new Date(trade.entryTime || 0).toISOString().split('T')[0];
+            const exitDate = new Date(trade.exitTime || 0).toISOString().split('T')[0];
+            const duration = (((trade.exitTime || 0) - (trade.entryTime || 0)) / 1000 / 60).toFixed(0);
             const outcome = trade.pnl >= 0 ? '✅' : '❌';
 
             console.log(`${i + 1}. ${outcome} ${trade.side} | ${entryDate} → ${exitDate}`);
             console.log(`   Entry: $${trade.entryPrice.toFixed(2)} | Exit: $${trade.exitPrice.toFixed(2)}`);
             console.log(`   PnL: $${trade.pnl.toFixed(2)} (${trade.pnlPercent >= 0 ? '+' : ''}${trade.pnlPercent.toFixed(2)}%) | ${trade.exitReason}`);
-            console.log(`   Duration: ${duration}m | Size: ${trade.size.toFixed(4)}`);
+            console.log(`   Duration: ${duration}m | Size: ${(trade.size || 0).toFixed(4)}`);
             console.log('');
         });
     } else {

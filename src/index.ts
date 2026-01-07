@@ -7,6 +7,7 @@ import { PerpBot } from './bot';
 import { BotConfig } from './types';
 import { HyperliquidConnector, MockExchange, IExchange } from './utils/exchange';
 import { ExchangeFactory, ExchangePlatform } from './exchanges/factory';
+import { startBotStatsServer } from './api/bot-stats-server';
 
 dotenvConfig();
 
@@ -168,6 +169,9 @@ async function main() {
     });
 
     try {
+        // Start bot stats server for dashboard
+        startBotStatsServer();
+
         await bot.initialize();
         await bot.start();
     } catch (error) {
