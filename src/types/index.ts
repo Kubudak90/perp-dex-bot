@@ -38,6 +38,7 @@ export interface Position {
     takeProfit: number;
     entryTime: number;
     unrealizedPnl: number;
+    liquidationPrice?: number;  // Optional liquidation price
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -51,6 +52,9 @@ export interface TradeResult {
     pnlPercent: number;
     duration: number;
     exitReason: 'SL' | 'TP' | 'SIGNAL';
+    entryTime?: number;  // Optional for backtests
+    exitTime?: number;   // Optional for backtests
+    size?: number;       // Optional for backtests
 }
 
 // ─────────────────────────────────────────────────────────────────────────

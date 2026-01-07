@@ -1,0 +1,11 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Python Dependencies for Extended Exchange Integration
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Extended Exchange Python SDK
+x10-python-trading>=0.4.5
+
+# Additional dependencies (SDK'nın bağımlılıkları)
+requests>=2.31.0
+websockets>=12.0
+python-dotenv>=1.0.0

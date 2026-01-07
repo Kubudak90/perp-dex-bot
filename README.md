@@ -79,6 +79,28 @@ MODE=live
 npm run dev
 ```
 
+### 4. Real-time Dashboard
+
+```bash
+# Terminal 1: Start API Server
+npm run api
+
+# Terminal 2: Start Dashboard (in another terminal)
+npm run dashboard
+```
+
+Dashboard will be available at `http://localhost:3001`
+
+Features:
+- Real-time position tracking
+- Live P&L updates (every 5 seconds)
+- Trading statistics and win rate
+- Account balance overview
+- Airdrop points estimation
+- WebSocket connection status
+
+See [DASHBOARD.md](./DASHBOARD.md) for detailed setup and API documentation.
+
 ## Dosya Yapısı
 
 ```

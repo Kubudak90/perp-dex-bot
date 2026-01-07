@@ -5,7 +5,9 @@
 import { config as dotenvConfig } from 'dotenv';
 import { PerpBot } from './bot';
 import { BotConfig } from './types';
-import { HyperliquidConnector, MockExchange } from './utils/exchange';
+import { HyperliquidConnector, MockExchange, IExchange } from './utils/exchange';
+import { ExchangeFactory, ExchangePlatform } from './exchanges/factory';
+import { startBotStatsServer } from './api/bot-stats-server';
 
 dotenvConfig();
 
@@ -73,34 +75,69 @@ async function main() {
   `);
 
     // ─────────────────────────────────────────────────────────────────────────
-    // MODE SELECTION
+    // MODE AND EXCHANGE SELECTION
     // ─────────────────────────────────────────────────────────────────────────
     const mode = process.env.MODE || 'paper';
+    const exchangePlatform = process.env.EXCHANGE || 'hyperliquid'; // hyperliquid, extended, grvt, pacifica
 
-    let exchange;
+    let exchange: IExchange;
 
-    if (mode === 'live') {
-        // LIVE MODE - Gerçek para
-        const privateKey = process.env.PRIVATE_KEY;
-        const walletAddress = process.env.WALLET_ADDRESS;
-
-        if (!privateKey || !walletAddress) {
-            console.error('❌ PRIVATE_KEY and WALLET_ADDRESS required for live mode');
-            process.exit(1);
-        }
-
-        exchange = new HyperliquidConnector(
-            privateKey,
-            walletAddress,
-            false // mainnet
-        );
-
-        console.log('⚠️  LIVE MODE - Real money at risk!');
-    } else {
+    if (mode === 'paper') {
         // PAPER MODE - Mock exchange
         const initialBalance = parseFloat(process.env.PAPER_BALANCE || '10000');
         exchange = new MockExchange(initialBalance);
         console.log(`📝 PAPER MODE - Starting balance: $${initialBalance}`);
+    } else if (mode === 'live') {
+        // LIVE MODE - Real exchange
+        console.log(`🔌 Connecting to ${exchangePlatform.toUpperCase()}...`);
+
+        if (exchangePlatform === 'extended') {
+            // EXTENDED EXCHANGE (Starknet Perp DEX)
+            const apiKey = process.env.EXTENDED_API_KEY;
+            const vault = process.env.EXTENDED_VAULT;
+            const starknetPrivateKey = process.env.STARKNET_PRIVATE_KEY;
+            const useTestnet = process.env.USE_TESTNET === 'true';
+
+            if (!apiKey) {
+                console.error('❌ EXTENDED_API_KEY required for Extended exchange');
+                process.exit(1);
+            }
+
+            exchange = ExchangeFactory.create(ExchangePlatform.EXTENDED, {
+                apiKey,
+                vault,
+                starknetPrivateKey,
+                testnet: useTestnet
+            });
+
+            console.log(`⚠️  LIVE MODE - Extended ${useTestnet ? 'Testnet' : 'Mainnet'}`);
+
+        } else if (exchangePlatform === 'hyperliquid') {
+            // HYPERLIQUID
+            const privateKey = process.env.PRIVATE_KEY;
+            const walletAddress = process.env.WALLET_ADDRESS;
+
+            if (!privateKey || !walletAddress) {
+                console.error('❌ PRIVATE_KEY and WALLET_ADDRESS required for Hyperliquid');
+                process.exit(1);
+            }
+
+            exchange = new HyperliquidConnector(
+                privateKey,
+                walletAddress,
+                false // mainnet
+            );
+
+            console.log('⚠️  LIVE MODE - Hyperliquid Mainnet');
+
+        } else {
+            console.error(`❌ Unsupported exchange: ${exchangePlatform}`);
+            console.error('Supported exchanges: hyperliquid, extended');
+            process.exit(1);
+        }
+    } else {
+        console.error(`❌ Invalid MODE: ${mode}. Use 'paper' or 'live'`);
+        process.exit(1);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -132,6 +169,9 @@ async function main() {
     });
 
     try {
+        // Start bot stats server for dashboard
+        startBotStatsServer();
+
         await bot.initialize();
         await bot.start();
     } catch (error) {

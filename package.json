@@ -7,7 +7,20 @@
         "dev": "ts-node src/index.ts",
         "build": "tsc",
         "start": "node dist/index.js",
+        "api": "ts-node src/api/server.ts",
+        "dashboard": "cd dashboard && npm run dev",
+        "dev:full": "npm run api",
         "backtest": "ts-node src/backtest.ts",
+        "backtest:v2": "ts-node src/test-backtest-v2.ts",
+        "backtest:optimize": "ts-node src/test-backtest-real.ts",
+        "backtest:30d": "ts-node src/backtest-binance.ts 30",
+        "backtest:60d": "ts-node src/backtest-binance.ts 60",
+        "backtest:90d": "ts-node src/backtest-binance.ts 90",
+        "fetch-data": "ts-node src/data/fetch-historical.ts",
+        "fetch:binance": "ts-node src/data/fetch-binance.ts",
+        "setup:python": "bash python/setup.sh",
+        "test:extended": "ts-node src/test-extended-simple.ts",
+        "test:market-data": "ts-node src/test-extended-market-data.ts",
         "lint": "eslint src/**/*.ts",
         "clean": "rimraf dist"
     },
@@ -23,13 +36,21 @@
     "author": "",
     "license": "MIT",
     "dependencies": {
-        "dotenv": "^16.3.1"
+        "@types/cors": "^2.8.19",
+        "@types/express": "^5.0.6",
+        "@types/ws": "^8.18.1",
+        "axios": "^1.13.2",
+        "cors": "^2.8.5",
+        "dotenv": "^16.6.1",
+        "express": "^5.2.1",
+        "starknet": "^6.24.1",
+        "ws": "^8.18.3"
     },
     "devDependencies": {
         "@types/node": "^20.10.0",
+        "rimraf": "^5.0.5",
         "ts-node": "^10.9.2",
-        "typescript": "^5.3.2",
-        "rimraf": "^5.0.5"
+        "typescript": "^5.3.2"
     },
     "engines": {
         "node": ">=18.0.0"
