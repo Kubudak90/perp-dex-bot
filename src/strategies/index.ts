@@ -149,7 +149,7 @@ export class TradingStrategy {
     private checkExitSignal(
         indicators: Indicators,
         position: Position,
-        currentPrice: number
+        _currentPrice: number
     ): Signal {
         // Supertrend flip
         if (position.side === 'LONG' && indicators.supertrend.trend === 'SHORT') {

@@ -5,6 +5,8 @@
 
 import { Candle, Position } from '../types';
 import { Logger } from './logger';
+import { retryWithBackoff, CircuitBreaker, RateLimiter, withTimeout } from './retry';
+import { NetworkError, ExchangeError, InsufficientDataError } from './errors';
 
 // ─────────────────────────────────────────────────────────────────────────
 // ABSTRACT EXCHANGE INTERFACE
@@ -47,16 +49,26 @@ export interface IExchange {
 export class HyperliquidConnector implements IExchange {
     private logger: Logger;
     private apiUrl: string;
-    private privateKey: string;
+    // Private key will be used for order signing when Hyperliquid SDK is integrated
+    private _privateKey: string; // eslint-disable-line @typescript-eslint/no-unused-vars
     private walletAddress: string;
+    private circuitBreaker: CircuitBreaker;
+    private rateLimiter: RateLimiter;
+    private readonly REQUEST_TIMEOUT = 30000; // 30 seconds
 
     constructor(privateKey: string, walletAddress: string, testnet: boolean = true) {
         this.logger = new Logger('Hyperliquid');
-        this.privateKey = privateKey;
+        this._privateKey = privateKey;
         this.walletAddress = walletAddress;
         this.apiUrl = testnet
             ? 'https://api.hyperliquid-testnet.xyz'
             : 'https://api.hyperliquid.xyz';
+
+        // Circuit breaker: 5 failures, 60s cooldown
+        this.circuitBreaker = new CircuitBreaker(5, 60000, 'Hyperliquid');
+
+        // Rate limiter: 10 requests per second
+        this.rateLimiter = new RateLimiter(10, 10, 'Hyperliquid');
     }
 
     async connect(): Promise<void> {
@@ -71,82 +83,146 @@ export class HyperliquidConnector implements IExchange {
     }
 
     async getCandles(symbol: string, timeframe: string, limit: number): Promise<Candle[]> {
-        try {
-            const response = await fetch(`${this.apiUrl}/info`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'candleSnapshot',
-                    req: {
-                        coin: symbol,
-                        interval: timeframe,
-                        startTime: Date.now() - (limit * this.getIntervalMs(timeframe)),
-                        endTime: Date.now()
+        return await retryWithBackoff(
+            async () => {
+                await this.rateLimiter.acquire();
+
+                return await this.circuitBreaker.execute(async () => {
+                    const response = await withTimeout(
+                        fetch(`${this.apiUrl}/info`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'candleSnapshot',
+                                req: {
+                                    coin: symbol,
+                                    interval: timeframe,
+                                    startTime: Date.now() - (limit * this.getIntervalMs(timeframe)),
+                                    endTime: Date.now()
+                                }
+                            })
+                        }),
+                        this.REQUEST_TIMEOUT,
+                        `Candles request timeout for ${symbol}`
+                    );
+
+                    if (!response.ok) {
+                        throw new NetworkError(
+                            `Failed to fetch candles: ${response.statusText}`,
+                            response.status
+                        );
                     }
-                })
-            });
 
-            const data = await response.json();
+                    const data = await response.json();
 
-            return data.map((c: any) => ({
-                timestamp: c.t,
-                open: parseFloat(c.o),
-                high: parseFloat(c.h),
-                low: parseFloat(c.l),
-                close: parseFloat(c.c),
-                volume: parseFloat(c.v)
-            }));
-        } catch (error) {
-            this.logger.error('Failed to fetch candles', error as Error);
-            return [];
-        }
+                    if (!Array.isArray(data) || data.length === 0) {
+                        throw new InsufficientDataError(`No candle data returned for ${symbol}`);
+                    }
+
+                    return data.map((c: any) => ({
+                        timestamp: c.t,
+                        open: parseFloat(c.o),
+                        high: parseFloat(c.h),
+                        low: parseFloat(c.l),
+                        close: parseFloat(c.c),
+                        volume: parseFloat(c.v)
+                    }));
+                }, 'getCandles');
+            },
+            { maxRetries: 4 },
+            this.logger,
+            'getCandles'
+        );
     }
 
     async getFundingRate(symbol: string): Promise<number> {
-        try {
-            const response = await fetch(`${this.apiUrl}/info`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'metaAndAssetCtxs'
-                })
-            });
+        return await retryWithBackoff(
+            async () => {
+                await this.rateLimiter.acquire();
 
-            const data = await response.json();
-            const assetCtx = data[1].find((a: any) => a.coin === symbol);
+                return await this.circuitBreaker.execute(async () => {
+                    const response = await withTimeout(
+                        fetch(`${this.apiUrl}/info`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'metaAndAssetCtxs'
+                            })
+                        }),
+                        this.REQUEST_TIMEOUT,
+                        'Funding rate request timeout'
+                    );
 
-            return assetCtx ? parseFloat(assetCtx.funding) : 0;
-        } catch (error) {
-            this.logger.error('Failed to fetch funding rate', error as Error);
-            return 0;
-        }
+                    if (!response.ok) {
+                        throw new NetworkError(
+                            `Failed to fetch funding rate: ${response.statusText}`,
+                            response.status
+                        );
+                    }
+
+                    const data = (await response.json()) as any[];
+                    const assetCtx = data[1]?.find((a: any) => a.coin === symbol);
+
+                    if (!assetCtx) {
+                        this.logger.warn(`No funding rate found for ${symbol}, returning 0`);
+                        return 0;
+                    }
+
+                    return parseFloat(assetCtx.funding);
+                }, 'getFundingRate');
+            },
+            { maxRetries: 4 },
+            this.logger,
+            'getFundingRate'
+        );
     }
 
     async getMarkPrice(symbol: string): Promise<number> {
-        try {
-            const response = await fetch(`${this.apiUrl}/info`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'metaAndAssetCtxs'
-                })
-            });
+        return await retryWithBackoff(
+            async () => {
+                await this.rateLimiter.acquire();
 
-            const data = await response.json();
-            const assetCtx = data[1].find((a: any) => a.coin === symbol);
+                return await this.circuitBreaker.execute(async () => {
+                    const response = await withTimeout(
+                        fetch(`${this.apiUrl}/info`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'metaAndAssetCtxs'
+                            })
+                        }),
+                        this.REQUEST_TIMEOUT,
+                        'Mark price request timeout'
+                    );
 
-            return assetCtx ? parseFloat(assetCtx.markPx) : 0;
-        } catch (error) {
-            this.logger.error('Failed to fetch mark price', error as Error);
-            return 0;
-        }
+                    if (!response.ok) {
+                        throw new NetworkError(
+                            `Failed to fetch mark price: ${response.statusText}`,
+                            response.status
+                        );
+                    }
+
+                    const data = (await response.json()) as any[];
+                    const assetCtx = data[1]?.find((a: any) => a.coin === symbol);
+
+                    if (!assetCtx) {
+                        throw new ExchangeError(`No mark price found for ${symbol}`);
+                    }
+
+                    return parseFloat(assetCtx.markPx);
+                }, 'getMarkPrice');
+            },
+            { maxRetries: 4 },
+            this.logger,
+            'getMarkPrice'
+        );
     }
 
     async openPosition(
         symbol: string,
         side: 'LONG' | 'SHORT',
         size: number,
-        leverage: number
+        _leverage: number
     ): Promise<{ orderId: string; avgPrice: number }> {
         // Hyperliquid order placement
         // NOTE: Bu kısım için gerçek imza ve order gönderimi gerekli
@@ -174,68 +250,107 @@ export class HyperliquidConnector implements IExchange {
         return { orderId, avgPrice: markPrice };
     }
 
-    async setStopLoss(symbol: string, stopPrice: number): Promise<void> {
+    async setStopLoss(_symbol: string, stopPrice: number): Promise<void> {
         this.logger.info(`Setting SL @ ${stopPrice}`);
         // Implement with Hyperliquid SDK
     }
 
-    async setTakeProfit(symbol: string, tpPrice: number): Promise<void> {
+    async setTakeProfit(_symbol: string, tpPrice: number): Promise<void> {
         this.logger.info(`Setting TP @ ${tpPrice}`);
         // Implement with Hyperliquid SDK
     }
 
     async getBalance(): Promise<number> {
-        try {
-            const response = await fetch(`${this.apiUrl}/info`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'clearinghouseState',
-                    user: this.walletAddress
-                })
-            });
+        return await retryWithBackoff(
+            async () => {
+                await this.rateLimiter.acquire();
 
-            const data = await response.json();
-            return parseFloat(data.marginSummary.accountValue);
-        } catch (error) {
-            this.logger.error('Failed to fetch balance', error as Error);
-            return 0;
-        }
+                return await this.circuitBreaker.execute(async () => {
+                    const response = await withTimeout(
+                        fetch(`${this.apiUrl}/info`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'clearinghouseState',
+                                user: this.walletAddress
+                            })
+                        }),
+                        this.REQUEST_TIMEOUT,
+                        'Balance request timeout'
+                    );
+
+                    if (!response.ok) {
+                        throw new NetworkError(
+                            `Failed to fetch balance: ${response.statusText}`,
+                            response.status
+                        );
+                    }
+
+                    const data = (await response.json()) as any;
+
+                    if (!data.marginSummary?.accountValue) {
+                        throw new ExchangeError('Invalid balance response');
+                    }
+
+                    return parseFloat(data.marginSummary.accountValue);
+                }, 'getBalance');
+            },
+            { maxRetries: 4 },
+            this.logger,
+            'getBalance'
+        );
     }
 
     async getPosition(symbol: string): Promise<Position | null> {
-        try {
-            const response = await fetch(`${this.apiUrl}/info`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    type: 'clearinghouseState',
-                    user: this.walletAddress
-                })
-            });
+        return await retryWithBackoff(
+            async () => {
+                await this.rateLimiter.acquire();
 
-            const data = await response.json();
-            const pos = data.assetPositions.find((p: any) => p.position.coin === symbol);
+                return await this.circuitBreaker.execute(async () => {
+                    const response = await withTimeout(
+                        fetch(`${this.apiUrl}/info`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: 'clearinghouseState',
+                                user: this.walletAddress
+                            })
+                        }),
+                        this.REQUEST_TIMEOUT,
+                        'Position request timeout'
+                    );
 
-            if (!pos || parseFloat(pos.position.szi) === 0) {
-                return null;
-            }
+                    if (!response.ok) {
+                        throw new NetworkError(
+                            `Failed to fetch position: ${response.statusText}`,
+                            response.status
+                        );
+                    }
 
-            const szi = parseFloat(pos.position.szi);
+                    const data = (await response.json()) as any;
+                    const pos = data.assetPositions?.find((p: any) => p.position?.coin === symbol);
 
-            return {
-                side: szi > 0 ? 'LONG' : 'SHORT',
-                entryPrice: parseFloat(pos.position.entryPx),
-                size: Math.abs(szi),
-                stopLoss: 0, // Managed separately
-                takeProfit: 0,
-                entryTime: Date.now(),
-                unrealizedPnl: parseFloat(pos.position.unrealizedPnl)
-            };
-        } catch (error) {
-            this.logger.error('Failed to fetch position', error as Error);
-            return null;
-        }
+                    if (!pos || parseFloat(pos.position.szi) === 0) {
+                        return null;
+                    }
+
+                    const szi = parseFloat(pos.position.szi);
+
+                    return {
+                        side: szi > 0 ? 'LONG' : 'SHORT',
+                        entryPrice: parseFloat(pos.position.entryPx),
+                        size: Math.abs(szi),
+                        stopLoss: 0, // Managed separately
+                        takeProfit: 0,
+                        entryTime: Date.now(),
+                        unrealizedPnl: parseFloat(pos.position.unrealizedPnl)
+                    };
+                }, 'getPosition');
+            },
+            { maxRetries: 4 },
+            this.logger,
+            'getPosition'
+        );
     }
 
     private getIntervalMs(timeframe: string): number {
@@ -286,17 +401,17 @@ export class MockExchange implements IExchange {
         return this.candles[this.currentIndex++];
     }
 
-    async getCandles(symbol: string, timeframe: string, limit: number): Promise<Candle[]> {
+    async getCandles(_symbol: string, _timeframe: string, limit: number): Promise<Candle[]> {
         const start = Math.max(0, this.currentIndex - limit);
         return this.candles.slice(start, this.currentIndex);
     }
 
-    async getFundingRate(symbol: string): Promise<number> {
+    async getFundingRate(_symbol: string): Promise<number> {
         // Mock: random funding between -0.01% and 0.01%
         return (Math.random() - 0.5) * 0.0002;
     }
 
-    async getMarkPrice(symbol: string): Promise<number> {
+    async getMarkPrice(_symbol: string): Promise<number> {
         if (this.currentIndex === 0) return 0;
         return this.candles[this.currentIndex - 1].close;
     }
@@ -305,7 +420,7 @@ export class MockExchange implements IExchange {
         symbol: string,
         side: 'LONG' | 'SHORT',
         size: number,
-        leverage: number
+        _leverage: number
     ): Promise<{ orderId: string; avgPrice: number }> {
         const price = await this.getMarkPrice(symbol);
 
@@ -346,13 +461,13 @@ export class MockExchange implements IExchange {
         return { orderId: `mock_close_${Date.now()}`, avgPrice: price };
     }
 
-    async setStopLoss(symbol: string, stopPrice: number): Promise<void> {
+    async setStopLoss(_symbol: string, stopPrice: number): Promise<void> {
         if (this.position) {
             this.position.stopLoss = stopPrice;
         }
     }
 
-    async setTakeProfit(symbol: string, tpPrice: number): Promise<void> {
+    async setTakeProfit(_symbol: string, tpPrice: number): Promise<void> {
         if (this.position) {
             this.position.takeProfit = tpPrice;
         }
@@ -362,7 +477,7 @@ export class MockExchange implements IExchange {
         return this.balance;
     }
 
-    async getPosition(symbol: string): Promise<Position | null> {
+    async getPosition(_symbol: string): Promise<Position | null> {
         return this.position;
     }
 }

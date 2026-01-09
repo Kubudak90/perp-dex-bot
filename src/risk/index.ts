@@ -74,7 +74,6 @@ export class RiskManager {
 
         const maxPositionValue = equity * (this.config.maxPositionSize / 100) * leverage;
         const stopDistance = Math.abs(entryPrice - stopLossPrice);
-        const stopPercent = (stopDistance / entryPrice) * 100;
 
         // Risk 1% of equity per trade (adjustable)
         const riskAmount = equity * 0.01;

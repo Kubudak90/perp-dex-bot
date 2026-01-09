@@ -6,6 +6,8 @@ import { config as dotenvConfig } from 'dotenv';
 import { PerpBot } from './bot';
 import { BotConfig } from './types';
 import { HyperliquidConnector, MockExchange } from './utils/exchange';
+import { loadConfigFromEnv, validateMode, printConfigSummary } from './utils/config';
+import { logError } from './utils/errors';
 
 dotenvConfig();
 
@@ -72,70 +74,55 @@ async function main() {
   ╚═══════════════════════════════════════════════════════════════════════╝
   `);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MODE SELECTION
-    // ─────────────────────────────────────────────────────────────────────────
-    const mode = process.env.MODE || 'paper';
+    try {
+        // ─────────────────────────────────────────────────────────────────────────
+        // VALIDATE MODE AND CREDENTIALS
+        // ─────────────────────────────────────────────────────────────────────────
+        const { mode, config: modeConfig } = validateMode();
 
-    let exchange;
+        let exchange;
 
-    if (mode === 'live') {
-        // LIVE MODE - Gerçek para
-        const privateKey = process.env.PRIVATE_KEY;
-        const walletAddress = process.env.WALLET_ADDRESS;
-
-        if (!privateKey || !walletAddress) {
-            console.error('❌ PRIVATE_KEY and WALLET_ADDRESS required for live mode');
-            process.exit(1);
+        if (mode === 'live') {
+            exchange = new HyperliquidConnector(
+                modeConfig.privateKey,
+                modeConfig.walletAddress,
+                modeConfig.testnet
+            );
+            console.log('⚠️  LIVE MODE - Real money at risk!');
+        } else {
+            exchange = new MockExchange(modeConfig.initialBalance);
+            console.log(`📝 PAPER MODE - Starting balance: $${modeConfig.initialBalance}`);
         }
 
-        exchange = new HyperliquidConnector(
-            privateKey,
-            walletAddress,
-            false // mainnet
-        );
+        // ─────────────────────────────────────────────────────────────────────────
+        // LOAD AND VALIDATE CONFIGURATION
+        // ─────────────────────────────────────────────────────────────────────────
+        const config = loadConfigFromEnv(DEFAULT_CONFIG);
+        printConfigSummary(config);
 
-        console.log('⚠️  LIVE MODE - Real money at risk!');
-    } else {
-        // PAPER MODE - Mock exchange
-        const initialBalance = parseFloat(process.env.PAPER_BALANCE || '10000');
-        exchange = new MockExchange(initialBalance);
-        console.log(`📝 PAPER MODE - Starting balance: $${initialBalance}`);
-    }
+        // ─────────────────────────────────────────────────────────────────────────
+        // START BOT
+        // ─────────────────────────────────────────────────────────────────────────
+        const bot = new PerpBot(config, exchange);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // CONFIG OVERRIDES (from env)
-    // ─────────────────────────────────────────────────────────────────────────
-    const config: BotConfig = {
-        ...DEFAULT_CONFIG,
-        symbol: process.env.SYMBOL || DEFAULT_CONFIG.symbol,
-        timeframe: process.env.TIMEFRAME || DEFAULT_CONFIG.timeframe,
-        leverage: parseInt(process.env.LEVERAGE || String(DEFAULT_CONFIG.leverage)),
-    };
+        // Graceful shutdown
+        process.on('SIGINT', () => {
+            console.log('\n🛑 Shutting down...');
+            bot.stop();
+            process.exit(0);
+        });
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // START BOT
-    // ─────────────────────────────────────────────────────────────────────────
-    const bot = new PerpBot(config, exchange);
+        process.on('SIGTERM', () => {
+            console.log('\n🛑 Shutting down...');
+            bot.stop();
+            process.exit(0);
+        });
 
-    // Graceful shutdown
-    process.on('SIGINT', () => {
-        console.log('\n🛑 Shutting down...');
-        bot.stop();
-        process.exit(0);
-    });
-
-    process.on('SIGTERM', () => {
-        console.log('\n🛑 Shutting down...');
-        bot.stop();
-        process.exit(0);
-    });
-
-    try {
         await bot.initialize();
         await bot.start();
     } catch (error) {
-        console.error('Fatal error:', error);
+        logError(error);
+        console.error('\n❌ Bot failed to start. Please check your configuration.');
         process.exit(1);
     }
 }

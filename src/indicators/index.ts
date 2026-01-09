@@ -78,7 +78,6 @@ export class IndicatorCalculator {
         let prevUpperBand = 0;
         let prevLowerBand = 0;
         let prevTrend: 'LONG' | 'SHORT' = 'LONG';
-        let prevSupertrend = 0;
 
         for (let i = 0; i < candles.length; i++) {
             const hl2 = (candles[i].high + candles[i].low) / 2;
@@ -139,7 +138,6 @@ export class IndicatorCalculator {
             prevUpperBand = upperBand;
             prevLowerBand = lowerBand;
             prevTrend = trend;
-            prevSupertrend = supertrendValue;
         }
 
         return results;
@@ -150,7 +148,6 @@ export class IndicatorCalculator {
     // Trend strength indicator - above 20/25 = trend exists
     // ─────────────────────────────────────────────────────────────────────────
     static calculateADX(candles: Candle[], period: number): number[] {
-        const adxValues: number[] = [];
         const plusDM: number[] = [];
         const minusDM: number[] = [];
         const tr: number[] = [];

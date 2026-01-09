@@ -3,7 +3,8 @@
 // Coordinates strategy, risk, and exchange
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { BotConfig, BotState, Signal, Position, TradeResult, Candle } from './types';
+import { BotConfig, BotState, Signal, TradeResult } from './types';
+import type { Position } from './types';
 import { IndicatorCalculator } from './indicators';
 import { TradingStrategy } from './strategies';
 import { RiskManager } from './risk';
@@ -206,7 +207,7 @@ export class PerpBot {
     // CLOSE POSITION
     // ─────────────────────────────────────────────────────────────────────────
     private async executeClose(
-        currentPrice: number,
+        _currentPrice: number,
         reason: 'SL' | 'TP' | 'SIGNAL'
     ): Promise<void> {
         if (!this.state.position) return;
