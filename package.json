@@ -31,11 +31,15 @@
     "dependencies": {
         "dotenv": "^16.3.1",
         "ethers": "^6.9.0",
-        "ws": "^8.16.0"
+        "ws": "^8.16.0",
+        "node-telegram-bot-api": "^0.64.0",
+        "better-sqlite3": "^9.2.2"
     },
     "devDependencies": {
+        "@types/better-sqlite3": "^7.6.8",
         "@types/jest": "^29.5.11",
         "@types/node": "^20.10.0",
+        "@types/node-telegram-bot-api": "^0.64.2",
         "@types/ws": "^8.5.10",
         "@typescript-eslint/eslint-plugin": "^6.15.0",
         "@typescript-eslint/parser": "^6.15.0",
