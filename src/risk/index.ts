@@ -177,6 +177,140 @@ export class RiskManager {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // UPDATE TRAILING STOP
+    // ─────────────────────────────────────────────────────────────────────────
+    updateTrailingStop(
+        position: Position,
+        currentPrice: number,
+        peakPrice: number
+    ): { newStopLoss: number; newPeakPrice: number } {
+        if (!this.config.useTrailingStop || !this.config.trailingStopDistance) {
+            return { newStopLoss: position.stopLoss, newPeakPrice: peakPrice };
+        }
+
+        let newPeakPrice = peakPrice;
+        let newStopLoss = position.stopLoss;
+
+        if (position.side === 'LONG') {
+            // Update peak if price is higher
+            if (currentPrice > newPeakPrice) {
+                newPeakPrice = currentPrice;
+
+                // Calculate new stop loss
+                const trailingStopPrice =
+                    newPeakPrice * (1 - this.config.trailingStopDistance / 100);
+
+                // Only move stop loss up, never down
+                if (trailingStopPrice > position.stopLoss) {
+                    newStopLoss = trailingStopPrice;
+                    this.logger.info(
+                        `Trailing stop updated: ${position.stopLoss.toFixed(2)} → ${newStopLoss.toFixed(2)}`
+                    );
+                }
+            }
+        } else {
+            // SHORT position
+            if (currentPrice < newPeakPrice || newPeakPrice === 0) {
+                newPeakPrice = currentPrice;
+
+                const trailingStopPrice =
+                    newPeakPrice * (1 + this.config.trailingStopDistance / 100);
+
+                // Only move stop loss down, never up
+                if (trailingStopPrice < position.stopLoss || position.stopLoss === 0) {
+                    newStopLoss = trailingStopPrice;
+                    this.logger.info(
+                        `Trailing stop updated: ${position.stopLoss.toFixed(2)} → ${newStopLoss.toFixed(2)}`
+                    );
+                }
+            }
+        }
+
+        return { newStopLoss, newPeakPrice };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK CONSECUTIVE LOSSES
+    // ─────────────────────────────────────────────────────────────────────────
+    checkConsecutiveLosses(state: BotState): { shouldPause: boolean; consecutiveLosses: number } {
+        const maxConsecutive = this.config.maxConsecutiveLosses || 999;
+        const consecutiveLosses = state.consecutiveLosses || 0;
+
+        if (consecutiveLosses >= maxConsecutive) {
+            this.logger.warn(
+                `Consecutive loss limit hit: ${consecutiveLosses}/${maxConsecutive}. Pausing trading.`
+            );
+            return { shouldPause: true, consecutiveLosses };
+        }
+
+        return { shouldPause: false, consecutiveLosses };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK MAX HOLD TIME
+    // ─────────────────────────────────────────────────────────────────────────
+    shouldForceClose(position: Position): boolean {
+        const maxHoldHours = this.config.maxHoldTimeHours;
+        if (!maxHoldHours) return false;
+
+        const holdTimeMs = Date.now() - position.entryTime;
+        const holdTimeHours = holdTimeMs / (1000 * 60 * 60);
+
+        if (holdTimeHours >= maxHoldHours) {
+            this.logger.warn(
+                `Max hold time exceeded: ${holdTimeHours.toFixed(1)}h >= ${maxHoldHours}h. Forcing close.`
+            );
+            return true;
+        }
+
+        return false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CALCULATE PORTFOLIO HEAT
+    // ─────────────────────────────────────────────────────────────────────────
+    calculatePortfolioHeat(position: Position, equity: number): number {
+        const positionValue = position.size * position.entryPrice;
+        const riskAmount = Math.abs(position.entryPrice - position.stopLoss) * position.size;
+        const heatPercent = (riskAmount / equity) * 100;
+
+        return heatPercent;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // UPDATE STATE AFTER TRADE (Enhanced)
+    // ─────────────────────────────────────────────────────────────────────────
+    updateStateAfterTradeEnhanced(state: BotState, result: TradeResult): BotState {
+        const newState = { ...state };
+
+        newState.dailyPnl += result.pnl;
+        newState.dailyTrades += 1;
+        newState.equity += result.pnl;
+        newState.trades.push(result);
+        newState.position = null;
+        newState.lastTradeTime = Date.now();
+        newState.peakPrice = undefined;
+        newState.portfolioHeat = 0;
+
+        // Track consecutive losses
+        if (result.pnl < 0) {
+            newState.lastLossTime = Date.now();
+            newState.consecutiveLosses = (newState.consecutiveLosses || 0) + 1;
+        } else {
+            newState.consecutiveLosses = 0; // Reset on win
+        }
+
+        // Log trade result
+        const emoji = result.pnl >= 0 ? '✅' : '❌';
+        this.logger.info(
+            `${emoji} Trade closed: ${result.side} | PnL: ${result.pnl.toFixed(2)} (${result.pnlPercent.toFixed(2)}%) | ` +
+                `Reason: ${result.exitReason} | Consecutive Losses: ${newState.consecutiveLosses}`
+        );
+
+        return newState;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // GET RISK STATS
     // ─────────────────────────────────────────────────────────────────────────
     getRiskStats(state: BotState): string {
@@ -184,6 +318,7 @@ export class RiskManager {
         const totalTrades = state.trades.length;
         const winningTrades = state.trades.filter(t => t.pnl > 0).length;
         const winRate = totalTrades > 0 ? (winningTrades / totalTrades) * 100 : 0;
+        const consecutiveLosses = state.consecutiveLosses || 0;
 
         return `
     ┌─────────────────────────────────────────┐
@@ -194,7 +329,9 @@ export class RiskManager {
     │ Daily Trades:  ${state.dailyTrades}/${this.config.maxDailyTrades}
     │ Total Trades:  ${totalTrades}
     │ Win Rate:      ${winRate.toFixed(1)}%
+    │ Consecutive L: ${consecutiveLosses}
     │ Position:      ${state.position ? state.position.side : 'NONE'}
+    │ Portfolio Heat: ${(state.portfolioHeat || 0).toFixed(2)}%
     └─────────────────────────────────────────┘`;
     }
 }

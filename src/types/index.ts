@@ -91,6 +91,12 @@ export interface RiskConfig {
     riskRewardRatio: number;      // Risk/Reward ratio (e.g., 1.5 = 1:1.5)
     stopLossAtrMultiplier: number; // SL = ATR * multiplier
     cooldownMinutes: number;      // Cooldown after loss
+    // Advanced features
+    useTrailingStop?: boolean;    // Enable trailing stop loss
+    trailingStopDistance?: number; // Distance in % from peak
+    maxConsecutiveLosses?: number; // Max consecutive losses before pause
+    maxPortfolioHeat?: number;    // Max % of equity at risk across all positions
+    maxHoldTimeHours?: number;    // Force close after X hours
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -140,6 +146,10 @@ export interface BotState {
     isActive: boolean;
     equity: number;
     trades: TradeResult[];
+    // Advanced tracking
+    consecutiveLosses?: number;    // Track consecutive losing trades
+    peakPrice?: number;            // Peak price since entry (for trailing stop)
+    portfolioHeat?: number;        // Current risk across all positions
 }
 
 // ─────────────────────────────────────────────────────────────────────────
