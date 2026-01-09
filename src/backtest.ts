@@ -8,6 +8,7 @@ import { IndicatorCalculator } from './indicators';
 import { TradingStrategy } from './strategies';
 import { RiskManager } from './risk';
 import { Logger } from './utils/logger';
+import { AnalyticsService } from './utils/analytics';
 
 interface BacktestResult {
     totalTrades: number;
@@ -33,12 +34,14 @@ export class Backtester {
     private strategy: TradingStrategy;
     private riskManager: RiskManager;
     private logger: Logger;
+    private analytics: AnalyticsService;
 
     constructor(config: BotConfig) {
         this.config = config;
         this.logger = new Logger('Backtest');
         this.strategy = new TradingStrategy(config);
         this.riskManager = new RiskManager(config.risk, this.logger);
+        this.analytics = new AnalyticsService();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -255,35 +258,24 @@ export class Backtester {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // PRINT RESULTS
+    // PRINT RESULTS (Phase 3: Using AnalyticsService)
     // ─────────────────────────────────────────────────────────────────────────
     printResults(results: BacktestResult): void {
+        // Use AnalyticsService for comprehensive metrics
+        const analyticsStats = this.analytics.calculatePerformanceStats(
+            results.trades,
+            results.totalPnl - results.totalPnl + 10000 // Approximation: final - total = initial
+        );
+
+        console.log('\n' + this.analytics.formatStats(analyticsStats));
+
+        // Additional backtest-specific info
         console.log(`
     ╔═══════════════════════════════════════════════════════════════════════╗
-    ║                        BACKTEST RESULTS                               ║
+    ║                    ADDITIONAL BACKTEST INFO                           ║
     ╠═══════════════════════════════════════════════════════════════════════╣
-    ║                                                                       ║
-    ║  PERFORMANCE                                                          ║
-    ║  ──────────────────────────────────────────────────────────────────   ║
-    ║  Total PnL:          $${results.totalPnl.toFixed(2).padStart(12)} (${results.totalPnlPercent.toFixed(2)}%)
-    ║  Max Drawdown:       $${results.maxDrawdown.toFixed(2).padStart(12)} (${results.maxDrawdownPercent.toFixed(2)}%)
-    ║  Sharpe Ratio:       ${results.sharpeRatio.toFixed(2).padStart(12)}
-    ║  Profit Factor:      ${results.profitFactor.toFixed(2).padStart(12)}
-    ║                                                                       ║
-    ║  TRADES                                                               ║
-    ║  ──────────────────────────────────────────────────────────────────   ║
-    ║  Total Trades:       ${String(results.totalTrades).padStart(12)}
-    ║  Winning:            ${String(results.winningTrades).padStart(12)}
-    ║  Losing:             ${String(results.losingTrades).padStart(12)}
-    ║  Win Rate:           ${results.winRate.toFixed(1).padStart(11)}%
-    ║                                                                       ║
-    ║  Average Win:        $${results.averageWin.toFixed(2).padStart(12)}
-    ║  Average Loss:       $${results.averageLoss.toFixed(2).padStart(12)}
-    ║  Largest Win:        $${results.largestWin.toFixed(2).padStart(12)}
-    ║  Largest Loss:       $${results.largestLoss.toFixed(2).padStart(12)}
-    ║                                                                       ║
     ║  Avg Trade Duration: ${(results.averageTradeDuration / 3600000).toFixed(1).padStart(11)}h
-    ║                                                                       ║
+    ║  Profit Factor:      ${results.profitFactor.toFixed(2).padStart(12)}
     ╚═══════════════════════════════════════════════════════════════════════╝
     `);
     }

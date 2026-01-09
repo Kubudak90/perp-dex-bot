@@ -3,11 +3,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { config as dotenvConfig } from 'dotenv';
-import { PerpBot } from './bot';
+import { PerpBot, BotServices } from './bot';
 import { BotConfig } from './types';
 import { HyperliquidConnector, MockExchange } from './utils/exchange';
 import { loadConfigFromEnv, validateMode, printConfigSummary } from './utils/config';
 import { logError } from './utils/errors';
+import { NotificationService } from './utils/notifications';
+import { DatabaseService } from './utils/database';
+import { AnalyticsService } from './utils/analytics';
+import { Logger } from './utils/logger';
 
 dotenvConfig();
 
@@ -101,20 +105,95 @@ async function main() {
         printConfigSummary(config);
 
         // ─────────────────────────────────────────────────────────────────────────
+        // INITIALIZE PHASE 3 SERVICES (Optional)
+        // ─────────────────────────────────────────────────────────────────────────
+        const logger = new Logger('Main');
+        const services: BotServices = {};
+
+        // Database service
+        const enableDatabase = process.env.ENABLE_DATABASE !== 'false';
+        if (enableDatabase) {
+            try {
+                const dbPath = process.env.DATABASE_PATH || './data/trades.db';
+                services.database = new DatabaseService(dbPath);
+                console.log(`💾 Database enabled: ${dbPath}`);
+            } catch (error) {
+                logger.error('Failed to initialize database', error as Error);
+                console.warn('⚠️  Database disabled due to error');
+            }
+        }
+
+        // Notification service
+        const enableNotifications = process.env.ENABLE_NOTIFICATIONS !== 'false';
+        if (enableNotifications) {
+            const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+            const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+            const discordWebhook = process.env.DISCORD_WEBHOOK_URL;
+
+            if (telegramToken && telegramChatId) {
+                try {
+                    services.notifications = new NotificationService({
+                        telegram: {
+                            enabled: true,
+                            botToken: telegramToken,
+                            chatId: telegramChatId
+                        },
+                        discord: discordWebhook ? {
+                            enabled: true,
+                            webhookUrl: discordWebhook
+                        } : undefined
+                    });
+                    console.log('📢 Notifications enabled (Telegram)');
+                } catch (error) {
+                    logger.error('Failed to initialize notifications', error as Error);
+                    console.warn('⚠️  Notifications disabled due to error');
+                }
+            } else if (discordWebhook) {
+                try {
+                    services.notifications = new NotificationService({
+                        discord: {
+                            enabled: true,
+                            webhookUrl: discordWebhook
+                        }
+                    });
+                    console.log('📢 Notifications enabled (Discord)');
+                } catch (error) {
+                    logger.error('Failed to initialize notifications', error as Error);
+                    console.warn('⚠️  Notifications disabled due to error');
+                }
+            }
+        }
+
+        // Analytics service (always available)
+        services.analytics = new AnalyticsService();
+
+        // ─────────────────────────────────────────────────────────────────────────
         // START BOT
         // ─────────────────────────────────────────────────────────────────────────
-        const bot = new PerpBot(config, exchange);
+        const bot = new PerpBot(config, exchange, services);
 
         // Graceful shutdown
         process.on('SIGINT', () => {
             console.log('\n🛑 Shutting down...');
             bot.stop();
+
+            // Close database connection
+            if (services.database) {
+                services.database.close();
+            }
+
             process.exit(0);
         });
 
         process.on('SIGTERM', () => {
             console.log('\n🛑 Shutting down...');
             bot.stop();
+
+            // Close database connection
+            if (services.database) {
+                services.database.close();
+            }
+
             process.exit(0);
         });
 

@@ -10,6 +10,15 @@ import { TradingStrategy } from './strategies';
 import { RiskManager } from './risk';
 import { Logger } from './utils/logger';
 import { IExchange } from './utils/exchange';
+import { NotificationService } from './utils/notifications';
+import { DatabaseService } from './utils/database';
+import { AnalyticsService } from './utils/analytics';
+
+export interface BotServices {
+    notifications?: NotificationService;
+    database?: DatabaseService;
+    analytics?: AnalyticsService;
+}
 
 export class PerpBot {
     private config: BotConfig;
@@ -20,12 +29,22 @@ export class PerpBot {
     private logger: Logger;
     private isRunning: boolean = false;
 
-    constructor(config: BotConfig, exchange: IExchange) {
+    // Phase 3 services (optional)
+    private notificationService?: NotificationService;
+    private databaseService?: DatabaseService;
+    private analyticsService?: AnalyticsService;
+
+    constructor(config: BotConfig, exchange: IExchange, services?: BotServices) {
         this.config = config;
         this.exchange = exchange;
         this.logger = new Logger('PerpBot');
         this.strategy = new TradingStrategy(config);
         this.riskManager = new RiskManager(config.risk, this.logger);
+
+        // Optional services
+        this.notificationService = services?.notifications;
+        this.databaseService = services?.database;
+        this.analyticsService = services?.analytics;
 
         this.state = {
             position: null,
@@ -35,7 +54,11 @@ export class PerpBot {
             lastLossTime: 0,
             isActive: true,
             equity: 0,
-            trades: []
+            trades: [],
+            // Phase 2 advanced fields
+            consecutiveLosses: 0,
+            peakPrice: undefined,
+            portfolioHeat: 0
         };
     }
 
@@ -77,6 +100,15 @@ export class PerpBot {
                 await this.sleep(this.getTickInterval());
             } catch (error) {
                 this.logger.error('Error in main loop', error as Error);
+
+                // Notify about error
+                if (this.notificationService) {
+                    await this.notificationService.notifyError(
+                        error as Error,
+                        'Main trading loop'
+                    ).catch(err => this.logger.error('Failed to send error notification', err as Error));
+                }
+
                 await this.sleep(5000);
             }
         }
@@ -112,6 +144,28 @@ export class PerpBot {
         // 3. Update position PnL if exists
         if (this.state.position) {
             this.updatePositionPnl(currentPrice);
+
+            // Phase 2: Update trailing stop if enabled
+            if (this.config.risk.useTrailingStop && this.state.peakPrice !== undefined) {
+                const { newStopLoss, newPeakPrice } = this.riskManager.updateTrailingStop(
+                    this.state.position,
+                    currentPrice,
+                    this.state.peakPrice
+                );
+                if (newStopLoss !== this.state.position.stopLoss) {
+                    this.state.position.stopLoss = newStopLoss;
+                    this.state.peakPrice = newPeakPrice;
+                    await this.exchange.setStopLoss(this.config.symbol, newStopLoss);
+                    this.logger.info(`📊 Trailing SL updated: ${newStopLoss.toFixed(2)}`);
+                }
+            }
+
+            // Phase 2: Check if position should be force-closed (max hold time)
+            if (this.riskManager.shouldForceClose(this.state.position)) {
+                this.logger.warn('⏰ Max hold time reached - Force closing position');
+                await this.executeClose(currentPrice, 'SIGNAL');
+                return;
+            }
 
             // Check SL/TP
             const sltpCheck = this.riskManager.checkSLTP(this.state.position, currentPrice);
@@ -196,11 +250,36 @@ export class PerpBot {
             unrealizedPnl: 0
         };
 
+        // Phase 2: Initialize peak price for trailing stop
+        if (this.config.risk.useTrailingStop) {
+            this.state.peakPrice = result.avgPrice;
+        }
+
+        // Phase 2: Update portfolio heat
+        if (this.config.risk.maxPortfolioHeat) {
+            this.state.portfolioHeat = this.riskManager.calculatePortfolioHeat(
+                this.state.position,
+                this.state.equity
+            );
+        }
+
         // Set SL/TP orders
         await this.exchange.setStopLoss(this.config.symbol, stopLoss);
         await this.exchange.setTakeProfit(this.config.symbol, takeProfit);
 
         this.logger.trade(side, result.avgPrice, `SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`);
+
+        // Phase 3: Send notification
+        if (this.notificationService) {
+            await this.notificationService.notifyTradeOpened(
+                side,
+                this.config.symbol,
+                result.avgPrice,
+                positionSize,
+                stopLoss,
+                takeProfit
+            ).catch(err => this.logger.error('Failed to send trade notification', err as Error));
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -235,8 +314,51 @@ export class PerpBot {
             exitReason: reason
         };
 
-        // Update state
-        this.state = this.riskManager.updateStateAfterTrade(this.state, tradeResult);
+        // Phase 3: Save to database
+        if (this.databaseService) {
+            try {
+                this.databaseService.saveTrade(
+                    tradeResult,
+                    this.config.symbol,
+                    this.config.leverage,
+                    this.state.position.size,
+                    this.state.equity,
+                    this.state.dailyPnl
+                );
+            } catch (err) {
+                this.logger.error('Failed to save trade to database', err as Error);
+            }
+        }
+
+        // Phase 3: Send notification
+        if (this.notificationService) {
+            await this.notificationService.notifyTradeClosed(
+                tradeResult,
+                this.config.symbol
+            ).catch(err => this.logger.error('Failed to send trade notification', err as Error));
+        }
+
+        // Phase 2: Update state with advanced risk tracking
+        if (this.config.risk.maxConsecutiveLosses || this.config.risk.maxPortfolioHeat) {
+            this.state = this.riskManager.updateStateAfterTradeEnhanced(this.state, tradeResult);
+
+            // Check consecutive losses and send alert
+            if (this.state.consecutiveLosses && this.state.consecutiveLosses >= (this.config.risk.maxConsecutiveLosses || 3)) {
+                if (this.notificationService) {
+                    await this.notificationService.notifyRiskAlert(
+                        `⚠️ Consecutive losses: ${this.state.consecutiveLosses}. Bot may pause trading.`,
+                        'error'
+                    ).catch(err => this.logger.error('Failed to send risk alert', err as Error));
+                }
+            }
+        } else {
+            // Standard state update
+            this.state = this.riskManager.updateStateAfterTrade(this.state, tradeResult);
+        }
+
+        // Reset peak price after closing position
+        this.state.peakPrice = undefined;
+        this.state.portfolioHeat = 0;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -252,6 +374,15 @@ export class PerpBot {
         );
 
         this.state.position.unrealizedPnl = pnl;
+
+        // Phase 2: Update peak price for trailing stop
+        if (this.config.risk.useTrailingStop && this.state.peakPrice !== undefined) {
+            if (this.state.position.side === 'LONG' && currentPrice > this.state.peakPrice) {
+                this.state.peakPrice = currentPrice;
+            } else if (this.state.position.side === 'SHORT' && currentPrice < this.state.peakPrice) {
+                this.state.peakPrice = currentPrice;
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────

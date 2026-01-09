@@ -15,7 +15,10 @@
         "lint:fix": "eslint src/**/*.ts --fix",
         "format": "prettier --write \"src/**/*.ts\"",
         "format:check": "prettier --check \"src/**/*.ts\"",
-        "clean": "rimraf dist"
+        "clean": "rimraf dist",
+        "demo:notifications": "ts-node examples/notification-demo.ts",
+        "demo:database": "ts-node examples/database-demo.ts",
+        "demo:analytics": "ts-node examples/analytics-demo.ts"
     },
     "keywords": [
         "trading-bot",
