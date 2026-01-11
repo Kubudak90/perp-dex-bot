@@ -3,9 +3,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { config as dotenvConfig } from 'dotenv';
-import { PerpBot } from './bot';
+import { PerpBot, BotServices } from './bot';
 import { BotConfig } from './types';
 import { HyperliquidConnector, MockExchange } from './utils/exchange';
+import { loadConfigFromEnv, validateMode, printConfigSummary } from './utils/config';
+import { logError } from './utils/errors';
+import { NotificationService } from './utils/notifications';
+import { DatabaseService } from './utils/database';
+import { AnalyticsService } from './utils/analytics';
+import { Logger } from './utils/logger';
 
 dotenvConfig();
 
@@ -72,70 +78,130 @@ async function main() {
   ╚═══════════════════════════════════════════════════════════════════════╝
   `);
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // MODE SELECTION
-    // ─────────────────────────────────────────────────────────────────────────
-    const mode = process.env.MODE || 'paper';
+    try {
+        // ─────────────────────────────────────────────────────────────────────────
+        // VALIDATE MODE AND CREDENTIALS
+        // ─────────────────────────────────────────────────────────────────────────
+        const { mode, config: modeConfig } = validateMode();
 
-    let exchange;
+        let exchange;
 
-    if (mode === 'live') {
-        // LIVE MODE - Gerçek para
-        const privateKey = process.env.PRIVATE_KEY;
-        const walletAddress = process.env.WALLET_ADDRESS;
-
-        if (!privateKey || !walletAddress) {
-            console.error('❌ PRIVATE_KEY and WALLET_ADDRESS required for live mode');
-            process.exit(1);
+        if (mode === 'live') {
+            exchange = new HyperliquidConnector(
+                modeConfig.privateKey,
+                modeConfig.walletAddress,
+                modeConfig.testnet
+            );
+            console.log('⚠️  LIVE MODE - Real money at risk!');
+        } else {
+            exchange = new MockExchange(modeConfig.initialBalance);
+            console.log(`📝 PAPER MODE - Starting balance: $${modeConfig.initialBalance}`);
         }
 
-        exchange = new HyperliquidConnector(
-            privateKey,
-            walletAddress,
-            false // mainnet
-        );
+        // ─────────────────────────────────────────────────────────────────────────
+        // LOAD AND VALIDATE CONFIGURATION
+        // ─────────────────────────────────────────────────────────────────────────
+        const config = loadConfigFromEnv(DEFAULT_CONFIG);
+        printConfigSummary(config);
 
-        console.log('⚠️  LIVE MODE - Real money at risk!');
-    } else {
-        // PAPER MODE - Mock exchange
-        const initialBalance = parseFloat(process.env.PAPER_BALANCE || '10000');
-        exchange = new MockExchange(initialBalance);
-        console.log(`📝 PAPER MODE - Starting balance: $${initialBalance}`);
-    }
+        // ─────────────────────────────────────────────────────────────────────────
+        // INITIALIZE PHASE 3 SERVICES (Optional)
+        // ─────────────────────────────────────────────────────────────────────────
+        const logger = new Logger('Main');
+        const services: BotServices = {};
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // CONFIG OVERRIDES (from env)
-    // ─────────────────────────────────────────────────────────────────────────
-    const config: BotConfig = {
-        ...DEFAULT_CONFIG,
-        symbol: process.env.SYMBOL || DEFAULT_CONFIG.symbol,
-        timeframe: process.env.TIMEFRAME || DEFAULT_CONFIG.timeframe,
-        leverage: parseInt(process.env.LEVERAGE || String(DEFAULT_CONFIG.leverage)),
-    };
+        // Database service
+        const enableDatabase = process.env.ENABLE_DATABASE !== 'false';
+        if (enableDatabase) {
+            try {
+                const dbPath = process.env.DATABASE_PATH || './data/trades.db';
+                services.database = new DatabaseService(dbPath);
+                console.log(`💾 Database enabled: ${dbPath}`);
+            } catch (error) {
+                logger.error('Failed to initialize database', error as Error);
+                console.warn('⚠️  Database disabled due to error');
+            }
+        }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // START BOT
-    // ─────────────────────────────────────────────────────────────────────────
-    const bot = new PerpBot(config, exchange);
+        // Notification service
+        const enableNotifications = process.env.ENABLE_NOTIFICATIONS !== 'false';
+        if (enableNotifications) {
+            const telegramToken = process.env.TELEGRAM_BOT_TOKEN;
+            const telegramChatId = process.env.TELEGRAM_CHAT_ID;
+            const discordWebhook = process.env.DISCORD_WEBHOOK_URL;
 
-    // Graceful shutdown
-    process.on('SIGINT', () => {
-        console.log('\n🛑 Shutting down...');
-        bot.stop();
-        process.exit(0);
-    });
+            if (telegramToken && telegramChatId) {
+                try {
+                    services.notifications = new NotificationService({
+                        telegram: {
+                            enabled: true,
+                            botToken: telegramToken,
+                            chatId: telegramChatId
+                        },
+                        discord: discordWebhook ? {
+                            enabled: true,
+                            webhookUrl: discordWebhook
+                        } : undefined
+                    });
+                    console.log('📢 Notifications enabled (Telegram)');
+                } catch (error) {
+                    logger.error('Failed to initialize notifications', error as Error);
+                    console.warn('⚠️  Notifications disabled due to error');
+                }
+            } else if (discordWebhook) {
+                try {
+                    services.notifications = new NotificationService({
+                        discord: {
+                            enabled: true,
+                            webhookUrl: discordWebhook
+                        }
+                    });
+                    console.log('📢 Notifications enabled (Discord)');
+                } catch (error) {
+                    logger.error('Failed to initialize notifications', error as Error);
+                    console.warn('⚠️  Notifications disabled due to error');
+                }
+            }
+        }
 
-    process.on('SIGTERM', () => {
-        console.log('\n🛑 Shutting down...');
-        bot.stop();
-        process.exit(0);
-    });
+        // Analytics service (always available)
+        services.analytics = new AnalyticsService();
 
-    try {
+        // ─────────────────────────────────────────────────────────────────────────
+        // START BOT
+        // ─────────────────────────────────────────────────────────────────────────
+        const bot = new PerpBot(config, exchange, services);
+
+        // Graceful shutdown
+        process.on('SIGINT', () => {
+            console.log('\n🛑 Shutting down...');
+            bot.stop();
+
+            // Close database connection
+            if (services.database) {
+                services.database.close();
+            }
+
+            process.exit(0);
+        });
+
+        process.on('SIGTERM', () => {
+            console.log('\n🛑 Shutting down...');
+            bot.stop();
+
+            // Close database connection
+            if (services.database) {
+                services.database.close();
+            }
+
+            process.exit(0);
+        });
+
         await bot.initialize();
         await bot.start();
     } catch (error) {
-        console.error('Fatal error:', error);
+        logError(error);
+        console.error('\n❌ Bot failed to start. Please check your configuration.');
         process.exit(1);
     }
 }

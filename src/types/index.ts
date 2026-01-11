@@ -38,6 +38,11 @@ export interface Position {
     takeProfit: number;
     entryTime: number;
     unrealizedPnl: number;
+    // Phase 6B: Partial TP tracking
+    initialSize?: number;           // Original position size
+    partialTpLevels?: number[];     // TP levels hit (e.g., [1, 2])
+    remainingSize?: number;         // Current position size after partials
+    peakPrice?: number;             // Peak price for trailing stop
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -69,6 +74,61 @@ export interface SupertrendResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// MARKET REGIME
+// ─────────────────────────────────────────────────────────────────────────
+export type MarketRegime = 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
+
+// ─────────────────────────────────────────────────────────────────────────
+// EXTERNAL DATA (Phase 6C)
+// ─────────────────────────────────────────────────────────────────────────
+export interface LiquidationLevel {
+    price: number;
+    amount: number;           // USD value of liquidations at this level
+    side: 'LONG' | 'SHORT';  // Which side gets liquidated
+}
+
+export interface LiquidationHeatmap {
+    timestamp: number;
+    levels: LiquidationLevel[];
+    nearestLong: number;      // Nearest long liquidation price
+    nearestShort: number;     // Nearest short liquidation price
+    intensityLong: number;    // Total long liq amount within 2%
+    intensityShort: number;   // Total short liq amount within 2%
+}
+
+export interface OrderBookLevel {
+    price: number;
+    size: number;             // Size in base currency
+    total: number;            // Cumulative size
+}
+
+export interface OrderBookSnapshot {
+    timestamp: number;
+    bids: OrderBookLevel[];   // Buy orders
+    asks: OrderBookLevel[];   // Sell orders
+    spread: number;           // Bid-ask spread ($)
+    spreadPercent: number;    // Spread as % of mid price
+    midPrice: number;         // (bestBid + bestAsk) / 2
+    bidDepth1pct: number;     // Total bid size within 1% of mid
+    askDepth1pct: number;     // Total ask size within 1% of mid
+    imbalance: number;        // (bidDepth - askDepth) / (bidDepth + askDepth)
+}
+
+export interface LargeOrder {
+    timestamp: number;
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;             // USD value
+    type: 'MARKET' | 'LIMIT';
+}
+
+export interface ExternalData {
+    liquidations?: LiquidationHeatmap;
+    orderBook?: OrderBookSnapshot;
+    recentLargeOrders?: LargeOrder[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // INDICATORS
 // ─────────────────────────────────────────────────────────────────────────
 export interface Indicators {
@@ -79,6 +139,30 @@ export interface Indicators {
     atr: number;
     fundingRate: number;
     atrPercentile: number;
+    // Phase 6A: Multi-timeframe
+    mtf?: {
+        trend1h: 'LONG' | 'SHORT' | 'NEUTRAL'; // 1h EMA trend
+        trend4h: 'LONG' | 'SHORT' | 'NEUTRAL'; // 4h EMA trend
+        ema50_1h?: number;
+        ema200_1h?: number;
+        ema50_4h?: number;
+        ema200_4h?: number;
+    };
+    // Phase 6A: Volume
+    volume?: {
+        current: number;
+        sma20: number;               // 20-period volume SMA
+        ratio: number;               // current / sma20
+        isSurge: boolean;            // volume > 2x SMA
+        isAbnormal: boolean;         // volume > 5x SMA (skip entry)
+    };
+    // Phase 6B: Market Regime
+    marketRegime?: {
+        regime: MarketRegime;        // Current market state
+        adxTrend: number;            // ADX for trend strength
+        atrVolatility: number;       // ATR for volatility
+        confidence: number;          // Confidence score (0-1)
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -91,6 +175,12 @@ export interface RiskConfig {
     riskRewardRatio: number;      // Risk/Reward ratio (e.g., 1.5 = 1:1.5)
     stopLossAtrMultiplier: number; // SL = ATR * multiplier
     cooldownMinutes: number;      // Cooldown after loss
+    // Advanced features
+    useTrailingStop?: boolean;    // Enable trailing stop loss
+    trailingStopDistance?: number; // Distance in % from peak
+    maxConsecutiveLosses?: number; // Max consecutive losses before pause
+    maxPortfolioHeat?: number;    // Max % of equity at risk across all positions
+    maxHoldTimeHours?: number;    // Force close after X hours
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -124,6 +214,54 @@ export interface BotConfig {
     minAtrPercentile: number;
     maxAtrPercentile: number;
 
+    // Phase 6A: Multi-Timeframe Confirmation
+    useMultiTimeframe?: boolean;      // Enable MTF confirmation
+    mtfRequire1hTrend?: boolean;      // Require 1h trend alignment
+    mtfRequire4hTrend?: boolean;      // Require 4h trend alignment
+
+    // Phase 6A: Volume Filters
+    useVolumeFilter?: boolean;        // Enable volume filters
+    volumeMinRatio?: number;          // Min volume/SMA ratio (e.g., 0.8)
+    volumeRejectSurge?: boolean;      // Reject abnormal volume spikes (> 5x)
+
+    // Phase 6A: Trading Hours
+    useTradingHours?: boolean;        // Enable session filtering
+    allowedSessions?: ('NY' | 'LONDON' | 'ASIA')[];  // Allowed sessions
+    avoidWeekends?: boolean;          // Skip weekend trading
+
+    // Phase 6B: Partial Profit Taking
+    usePartialTp?: boolean;           // Enable scale-out exits
+    partialTpLevels?: {               // TP levels for scaling out
+        level1?: { rrRatio: number; closePercent: number };  // e.g., 1:1, close 50%
+        level2?: { rrRatio: number; closePercent: number };  // e.g., 1.5:1, close 30%
+        level3?: { rrRatio: number; closePercent: number };  // e.g., 2:1, close 20%
+    };
+
+    // Phase 6B: Dynamic Stop Loss
+    useDynamicSl?: boolean;           // Enable volatility-based SL
+    slMultiplierLow?: number;         // SL multiplier in low volatility (e.g., 1.0)
+    slMultiplierHigh?: number;        // SL multiplier in high volatility (e.g., 2.0)
+
+    // Phase 6B: Market Regime
+    useMarketRegime?: boolean;        // Enable regime filtering
+    skipRangingMarkets?: boolean;     // Skip trades in ranging markets
+    reduceInVolatile?: boolean;       // Reduce position size in volatile markets
+    volatileReduction?: number;       // Position reduction % (e.g., 0.5 = 50%)
+
+    // Phase 6C: External Data Integration
+    useLiquidationData?: boolean;     // Enable liquidation heatmap analysis
+    liqAvoidDistance?: number;        // Avoid entries within X% of major liq levels
+    liqIntensityThreshold?: number;   // Min USD liq amount to be considered "major"
+
+    useOrderBookData?: boolean;       // Enable order book analysis
+    maxSpreadPercent?: number;        // Max allowed spread % (skip if wider)
+    minOrderBookDepth?: number;       // Min 1% depth required (USD)
+    imbalanceThreshold?: number;      // Max order book imbalance (-1 to 1)
+
+    useLargeOrderTracking?: boolean;  // Enable whale tracking
+    largeOrderThreshold?: number;     // Min USD size to be considered "large"
+    avoidAfterLargeOrder?: number;    // Minutes to wait after large contra order
+
     // Risk management
     risk: RiskConfig;
 }
@@ -140,6 +278,10 @@ export interface BotState {
     isActive: boolean;
     equity: number;
     trades: TradeResult[];
+    // Advanced tracking
+    consecutiveLosses?: number;    // Track consecutive losing trades
+    peakPrice?: number;            // Peak price since entry (for trailing stop)
+    portfolioHeat?: number;        // Current risk across all positions
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -150,4 +292,46 @@ export interface OrderResult {
     avgPrice: number;
     filledSize?: number;
     status?: 'filled' | 'partial' | 'cancelled';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PERFORMANCE METRICS (Phase 6D)
+// ─────────────────────────────────────────────────────────────────────────
+export interface PerformanceMetrics {
+    // Basic metrics
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    winRate: number;              // % of winning trades
+
+    // PnL metrics
+    totalPnl: number;
+    totalPnlPercent: number;
+    avgWin: number;
+    avgLoss: number;
+    largestWin: number;
+    largestLoss: number;
+    profitFactor: number;         // Gross profit / Gross loss
+
+    // Risk metrics
+    maxDrawdown: number;          // Maximum peak-to-trough decline ($)
+    maxDrawdownPercent: number;   // Maximum drawdown as %
+    sharpeRatio: number;          // Risk-adjusted returns
+    sortinoRatio: number;         // Downside risk-adjusted returns
+
+    // Trade characteristics
+    avgHoldTime: number;          // Average position duration (ms)
+    avgTradeDuration: number;     // Same as above (hours)
+    maxConsecutiveWins: number;
+    maxConsecutiveLosses: number;
+
+    // Equity curve
+    finalEquity: number;
+    peakEquity: number;
+    returnOnInvestment: number;   // %
+
+    // Advanced
+    expectancy: number;           // Average $ per trade
+    recoveryFactor: number;       // Net profit / Max drawdown
+    calmarRatio: number;          // Annual return / Max drawdown
 }
