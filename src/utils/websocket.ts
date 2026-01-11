@@ -54,6 +54,12 @@ export class WebSocketManager extends EventEmitter {
         this.isConnecting = true;
         this.shouldReconnect = true;
 
+        // Clean up old socket if it exists
+        if (this.ws) {
+            this.cleanupSocket(this.ws);
+            this.ws = null;
+        }
+
         try {
             this.logger.info(`Connecting to ${this.config.url}`);
 
@@ -93,11 +99,50 @@ export class WebSocketManager extends EventEmitter {
         }
 
         if (this.ws) {
+            this.cleanupSocket(this.ws);
             this.ws.close(1000, 'Normal closure');
             this.ws = null;
         }
 
         this.logger.info('WebSocket disconnected');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RECONNECT
+    // Explicitly reconnect (closes old socket and creates new one)
+    // ─────────────────────────────────────────────────────────────────────────
+    async reconnect(): Promise<void> {
+        this.logger.info('Reconnecting WebSocket...');
+
+        // Disable auto-reconnect temporarily
+        const oldShouldReconnect = this.shouldReconnect;
+        this.shouldReconnect = false;
+
+        // Close existing connection
+        if (this.ws) {
+            this.cleanupSocket(this.ws);
+            this.ws.close(1000, 'Reconnecting');
+            this.ws = null;
+        }
+
+        // Clear timers
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+
+        if (this.pingTimer) {
+            clearInterval(this.pingTimer);
+            this.pingTimer = null;
+        }
+
+        // Reset state
+        this.isConnecting = false;
+        this.reconnectAttempts = 0;
+
+        // Restore auto-reconnect setting and connect
+        this.shouldReconnect = oldShouldReconnect;
+        await this.connect();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -202,6 +247,12 @@ export class WebSocketManager extends EventEmitter {
             this.pingTimer = null;
         }
 
+        // Prevent race condition: only set to null if this is the current socket
+        // The socket reference should already be cleaned up before creating new one
+        if (this.ws) {
+            this.ws = null;
+        }
+
         this.emit('disconnected', { code, reason });
 
         // Attempt reconnection
@@ -273,6 +324,20 @@ export class WebSocketManager extends EventEmitter {
     // ─────────────────────────────────────────────────────────────────────────
     // HELPERS
     // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Clean up WebSocket event listeners to prevent race conditions
+     * when reconnecting
+     */
+    private cleanupSocket(socket: WebSocket): void {
+        socket.removeAllListeners('open');
+        socket.removeAllListeners('message');
+        socket.removeAllListeners('error');
+        socket.removeAllListeners('close');
+        socket.removeAllListeners('ping');
+        socket.removeAllListeners('pong');
+    }
+
     private waitForConnection(): Promise<void> {
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
