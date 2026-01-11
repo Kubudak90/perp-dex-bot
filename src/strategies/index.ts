@@ -2,10 +2,13 @@
 // TRADING STRATEGY
 // Supertrend + EMA Filter + ADX Confirmation + Funding Filter
 // Phase 6A: + Multi-Timeframe + Volume + Trading Hours
+// Phase 6B: + Partial TP + Dynamic SL + Market Regime
+// Phase 6C: + External Data (Liquidations, Order Book, Large Orders)
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { Signal, Indicators, BotConfig, Position } from '../types';
+import { Signal, Indicators, BotConfig, Position, ExternalData } from '../types';
 import { TradingHoursManager } from '../utils/trading-hours';
+import { ExternalDataAnalyzer } from '../utils/external-data';
 
 export class TradingStrategy {
     private config: BotConfig;
@@ -20,7 +23,8 @@ export class TradingStrategy {
     generateSignal(
         indicators: Indicators,
         currentPosition: Position | null,
-        currentPrice: number
+        currentPrice: number,
+        externalData?: ExternalData
     ): Signal {
 
         // ═══════════════════════════════════════════════════════════════════════
@@ -177,7 +181,36 @@ export class TradingStrategy {
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 7: Entry Conditions
+        // STEP 7: Phase 6C External Data Filters
+        // ═══════════════════════════════════════════════════════════════════════
+
+        if (externalData) {
+            const externalCheck = ExternalDataAnalyzer.analyzeExternalData(
+                supertrendSignal,
+                currentPrice,
+                externalData,
+                {
+                    liqAvoidDistance: this.config.useLiquidationData ? this.config.liqAvoidDistance : undefined,
+                    liqIntensityThreshold: this.config.useLiquidationData ? this.config.liqIntensityThreshold : undefined,
+                    maxSpreadPercent: this.config.useOrderBookData ? this.config.maxSpreadPercent : undefined,
+                    minOrderBookDepth: this.config.useOrderBookData ? this.config.minOrderBookDepth : undefined,
+                    imbalanceThreshold: this.config.useOrderBookData ? this.config.imbalanceThreshold : undefined,
+                    avoidAfterLargeOrder: this.config.useLargeOrderTracking ? this.config.avoidAfterLargeOrder : undefined,
+                    largeOrderThreshold: this.config.useLargeOrderTracking ? this.config.largeOrderThreshold : undefined
+                }
+            );
+
+            if (!externalCheck.safe) {
+                // External data indicates unfavorable conditions
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 8: Entry Conditions
         // All filters must align
         // ═══════════════════════════════════════════════════════════════════════
 

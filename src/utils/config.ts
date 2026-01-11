@@ -241,7 +241,21 @@ export function loadConfigFromEnv(defaults?: Partial<BotConfig>): BotConfig {
         useMarketRegime: getEnvBoolean('USE_MARKET_REGIME', defaults?.useMarketRegime ?? false),
         skipRangingMarkets: getEnvBoolean('SKIP_RANGING_MARKETS', defaults?.skipRangingMarkets ?? true),
         reduceInVolatile: getEnvBoolean('REDUCE_IN_VOLATILE', defaults?.reduceInVolatile ?? true),
-        volatileReduction: getEnvNumber('VOLATILE_REDUCTION', defaults?.volatileReduction ?? 0.5)
+        volatileReduction: getEnvNumber('VOLATILE_REDUCTION', defaults?.volatileReduction ?? 0.5),
+
+        // Phase 6C: External Data Integration
+        useLiquidationData: getEnvBoolean('USE_LIQUIDATION_DATA', defaults?.useLiquidationData ?? false),
+        liqAvoidDistance: getEnvNumber('LIQ_AVOID_DISTANCE', defaults?.liqAvoidDistance ?? 0.02),
+        liqIntensityThreshold: getEnvNumber('LIQ_INTENSITY_THRESHOLD', defaults?.liqIntensityThreshold ?? 1000000),
+
+        useOrderBookData: getEnvBoolean('USE_ORDERBOOK_DATA', defaults?.useOrderBookData ?? false),
+        maxSpreadPercent: getEnvNumber('MAX_SPREAD_PERCENT', defaults?.maxSpreadPercent ?? 0.001),
+        minOrderBookDepth: getEnvNumber('MIN_ORDERBOOK_DEPTH', defaults?.minOrderBookDepth ?? 100000),
+        imbalanceThreshold: getEnvNumber('IMBALANCE_THRESHOLD', defaults?.imbalanceThreshold ?? 0.7),
+
+        useLargeOrderTracking: getEnvBoolean('USE_LARGE_ORDER_TRACKING', defaults?.useLargeOrderTracking ?? false),
+        largeOrderThreshold: getEnvNumber('LARGE_ORDER_THRESHOLD', defaults?.largeOrderThreshold ?? 100000),
+        avoidAfterLargeOrder: getEnvNumber('AVOID_AFTER_LARGE_ORDER', defaults?.avoidAfterLargeOrder ?? 5)
     };
 
     // Validate configuration

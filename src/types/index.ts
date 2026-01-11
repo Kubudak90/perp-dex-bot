@@ -79,6 +79,56 @@ export interface SupertrendResult {
 export type MarketRegime = 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
 
 // ─────────────────────────────────────────────────────────────────────────
+// EXTERNAL DATA (Phase 6C)
+// ─────────────────────────────────────────────────────────────────────────
+export interface LiquidationLevel {
+    price: number;
+    amount: number;           // USD value of liquidations at this level
+    side: 'LONG' | 'SHORT';  // Which side gets liquidated
+}
+
+export interface LiquidationHeatmap {
+    timestamp: number;
+    levels: LiquidationLevel[];
+    nearestLong: number;      // Nearest long liquidation price
+    nearestShort: number;     // Nearest short liquidation price
+    intensityLong: number;    // Total long liq amount within 2%
+    intensityShort: number;   // Total short liq amount within 2%
+}
+
+export interface OrderBookLevel {
+    price: number;
+    size: number;             // Size in base currency
+    total: number;            // Cumulative size
+}
+
+export interface OrderBookSnapshot {
+    timestamp: number;
+    bids: OrderBookLevel[];   // Buy orders
+    asks: OrderBookLevel[];   // Sell orders
+    spread: number;           // Bid-ask spread ($)
+    spreadPercent: number;    // Spread as % of mid price
+    midPrice: number;         // (bestBid + bestAsk) / 2
+    bidDepth1pct: number;     // Total bid size within 1% of mid
+    askDepth1pct: number;     // Total ask size within 1% of mid
+    imbalance: number;        // (bidDepth - askDepth) / (bidDepth + askDepth)
+}
+
+export interface LargeOrder {
+    timestamp: number;
+    side: 'BUY' | 'SELL';
+    price: number;
+    size: number;             // USD value
+    type: 'MARKET' | 'LIMIT';
+}
+
+export interface ExternalData {
+    liquidations?: LiquidationHeatmap;
+    orderBook?: OrderBookSnapshot;
+    recentLargeOrders?: LargeOrder[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // INDICATORS
 // ─────────────────────────────────────────────────────────────────────────
 export interface Indicators {
@@ -197,6 +247,20 @@ export interface BotConfig {
     skipRangingMarkets?: boolean;     // Skip trades in ranging markets
     reduceInVolatile?: boolean;       // Reduce position size in volatile markets
     volatileReduction?: number;       // Position reduction % (e.g., 0.5 = 50%)
+
+    // Phase 6C: External Data Integration
+    useLiquidationData?: boolean;     // Enable liquidation heatmap analysis
+    liqAvoidDistance?: number;        // Avoid entries within X% of major liq levels
+    liqIntensityThreshold?: number;   // Min USD liq amount to be considered "major"
+
+    useOrderBookData?: boolean;       // Enable order book analysis
+    maxSpreadPercent?: number;        // Max allowed spread % (skip if wider)
+    minOrderBookDepth?: number;       // Min 1% depth required (USD)
+    imbalanceThreshold?: number;      // Max order book imbalance (-1 to 1)
+
+    useLargeOrderTracking?: boolean;  // Enable whale tracking
+    largeOrderThreshold?: number;     // Min USD size to be considered "large"
+    avoidAfterLargeOrder?: number;    // Minutes to wait after large contra order
 
     // Risk management
     risk: RiskConfig;
