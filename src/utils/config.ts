@@ -189,8 +189,31 @@ export function loadConfigFromEnv(defaults?: Partial<BotConfig>): BotConfig {
             maxDailyTrades: getEnvInt('MAX_DAILY_TRADES', defaults?.risk?.maxDailyTrades || 3),
             riskRewardRatio: getEnvNumber('RISK_REWARD_RATIO', defaults?.risk?.riskRewardRatio || 1.5),
             stopLossAtrMultiplier: getEnvNumber('STOP_LOSS_ATR_MULTIPLIER', defaults?.risk?.stopLossAtrMultiplier || 1.5),
-            cooldownMinutes: getEnvInt('COOLDOWN_MINUTES', defaults?.risk?.cooldownMinutes || 30)
-        }
+            cooldownMinutes: getEnvInt('COOLDOWN_MINUTES', defaults?.risk?.cooldownMinutes || 30),
+            // Phase 2 Advanced Risk (optional)
+            useTrailingStop: getEnvBoolean('USE_TRAILING_STOP', defaults?.risk?.useTrailingStop ?? false),
+            trailingStopDistance: getEnvNumber('TRAILING_STOP_DISTANCE', defaults?.risk?.trailingStopDistance),
+            maxConsecutiveLosses: getEnvInt('MAX_CONSECUTIVE_LOSSES', defaults?.risk?.maxConsecutiveLosses),
+            maxPortfolioHeat: getEnvNumber('MAX_PORTFOLIO_HEAT', defaults?.risk?.maxPortfolioHeat),
+            maxHoldTimeHours: getEnvNumber('MAX_HOLD_TIME_HOURS', defaults?.risk?.maxHoldTimeHours)
+        },
+
+        // Phase 6A: Multi-Timeframe Confirmation
+        useMultiTimeframe: getEnvBoolean('USE_MULTI_TIMEFRAME', defaults?.useMultiTimeframe ?? false),
+        mtfRequire1hTrend: getEnvBoolean('MTF_REQUIRE_1H_TREND', defaults?.mtfRequire1hTrend ?? false),
+        mtfRequire4hTrend: getEnvBoolean('MTF_REQUIRE_4H_TREND', defaults?.mtfRequire4hTrend ?? false),
+
+        // Phase 6A: Volume Filters
+        useVolumeFilter: getEnvBoolean('USE_VOLUME_FILTER', defaults?.useVolumeFilter ?? false),
+        volumeMinRatio: getEnvNumber('VOLUME_MIN_RATIO', defaults?.volumeMinRatio),
+        volumeRejectSurge: getEnvBoolean('VOLUME_REJECT_SURGE', defaults?.volumeRejectSurge ?? true),
+
+        // Phase 6A: Trading Hours
+        useTradingHours: getEnvBoolean('USE_TRADING_HOURS', defaults?.useTradingHours ?? false),
+        allowedSessions: process.env.ALLOWED_SESSIONS
+            ? process.env.ALLOWED_SESSIONS.split(',').map(s => s.trim() as 'NY' | 'LONDON' | 'ASIA')
+            : defaults?.allowedSessions,
+        avoidWeekends: getEnvBoolean('AVOID_WEEKENDS', defaults?.avoidWeekends ?? true)
     };
 
     // Validate configuration

@@ -1,9 +1,11 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // TRADING STRATEGY
 // Supertrend + EMA Filter + ADX Confirmation + Funding Filter
+// Phase 6A: + Multi-Timeframe + Volume + Trading Hours
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { Signal, Indicators, BotConfig, Position } from '../types';
+import { TradingHoursManager } from '../utils/trading-hours';
 
 export class TradingStrategy {
     private config: BotConfig;
@@ -83,7 +85,76 @@ export class TradingStrategy {
         }
 
         // ═══════════════════════════════════════════════════════════════════════
-        // STEP 6: Entry Conditions
+        // STEP 6: Phase 6A Additional Filters
+        // ═══════════════════════════════════════════════════════════════════════
+
+        // Trading Hours Filter
+        if (this.config.useTradingHours) {
+            const allowedSessions = this.config.allowedSessions || ['NY', 'LONDON'];
+            const avoidWeekends = this.config.avoidWeekends !== false;
+
+            if (!TradingHoursManager.isTradingAllowed(allowedSessions, avoidWeekends)) {
+                // Not in allowed trading hours - only check exits
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+        }
+
+        // Volume Filter
+        if (this.config.useVolumeFilter && indicators.volume) {
+            // Reject abnormal volume (potential manipulation)
+            if (this.config.volumeRejectSurge && indicators.volume.isAbnormal) {
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+
+            // Require minimum volume
+            const minRatio = this.config.volumeMinRatio || 0.8;
+            if (indicators.volume.ratio < minRatio) {
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+        }
+
+        // Multi-Timeframe Filter
+        if (this.config.useMultiTimeframe && indicators.mtf) {
+            const signal = supertrendSignal;
+
+            // Require 1h trend alignment
+            if (this.config.mtfRequire1hTrend && indicators.mtf.trend1h !== 'NEUTRAL') {
+                const aligned1h = (signal === 'LONG' && indicators.mtf.trend1h === 'LONG') ||
+                                  (signal === 'SHORT' && indicators.mtf.trend1h === 'SHORT');
+
+                if (!aligned1h) {
+                    if (currentPosition) {
+                        return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                    }
+                    return 'NONE';
+                }
+            }
+
+            // Require 4h trend alignment
+            if (this.config.mtfRequire4hTrend && indicators.mtf.trend4h !== 'NEUTRAL') {
+                const aligned4h = (signal === 'LONG' && indicators.mtf.trend4h === 'LONG') ||
+                                  (signal === 'SHORT' && indicators.mtf.trend4h === 'SHORT');
+
+                if (!aligned4h) {
+                    if (currentPosition) {
+                        return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                    }
+                    return 'NONE';
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // STEP 7: Entry Conditions
         // All filters must align
         // ═══════════════════════════════════════════════════════════════════════
 

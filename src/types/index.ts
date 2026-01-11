@@ -79,6 +79,23 @@ export interface Indicators {
     atr: number;
     fundingRate: number;
     atrPercentile: number;
+    // Phase 6A: Multi-timeframe
+    mtf?: {
+        trend1h: 'LONG' | 'SHORT' | 'NEUTRAL'; // 1h EMA trend
+        trend4h: 'LONG' | 'SHORT' | 'NEUTRAL'; // 4h EMA trend
+        ema50_1h?: number;
+        ema200_1h?: number;
+        ema50_4h?: number;
+        ema200_4h?: number;
+    };
+    // Phase 6A: Volume
+    volume?: {
+        current: number;
+        sma20: number;               // 20-period volume SMA
+        ratio: number;               // current / sma20
+        isSurge: boolean;            // volume > 2x SMA
+        isAbnormal: boolean;         // volume > 5x SMA (skip entry)
+    };
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -129,6 +146,21 @@ export interface BotConfig {
     atrLookback: number;
     minAtrPercentile: number;
     maxAtrPercentile: number;
+
+    // Phase 6A: Multi-Timeframe Confirmation
+    useMultiTimeframe?: boolean;      // Enable MTF confirmation
+    mtfRequire1hTrend?: boolean;      // Require 1h trend alignment
+    mtfRequire4hTrend?: boolean;      // Require 4h trend alignment
+
+    // Phase 6A: Volume Filters
+    useVolumeFilter?: boolean;        // Enable volume filters
+    volumeMinRatio?: number;          // Min volume/SMA ratio (e.g., 0.8)
+    volumeRejectSurge?: boolean;      // Reject abnormal volume spikes (> 5x)
+
+    // Phase 6A: Trading Hours
+    useTradingHours?: boolean;        // Enable session filtering
+    allowedSessions?: ('NY' | 'LONDON' | 'ASIA')[];  // Allowed sessions
+    avoidWeekends?: boolean;          // Skip weekend trading
 
     // Risk management
     risk: RiskConfig;
