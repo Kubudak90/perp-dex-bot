@@ -360,6 +360,55 @@ export class IndicatorCalculator {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // MARKET REGIME DETECTION (Phase 6B)
+    // Identifies market state: TRENDING, RANGING, VOLATILE, QUIET
+    // ─────────────────────────────────────────────────────────────────────────
+    static detectMarketRegime(
+        adx: number,
+        atrPercentile: number,
+        adxThreshold: number = 25
+    ): {
+        regime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
+        adxTrend: number;
+        atrVolatility: number;
+        confidence: number;
+    } {
+        const adxTrend = adx;
+        const atrVolatility = atrPercentile;
+
+        // Decision matrix:
+        // TRENDING: ADX > 25 && ATR in normal range (30-80)
+        // RANGING: ADX < 20 && ATR in normal range
+        // VOLATILE: ATR > 80 (regardless of ADX)
+        // QUIET: ATR < 20 (regardless of ADX)
+
+        let regime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
+        let confidence: number;
+
+        // Priority: Volatility extremes first
+        if (atrVolatility > 80) {
+            regime = 'VOLATILE';
+            confidence = Math.min((atrVolatility - 80) / 20, 1.0);
+        } else if (atrVolatility < 20) {
+            regime = 'QUIET';
+            confidence = Math.min((20 - atrVolatility) / 20, 1.0);
+        } else if (adx > adxThreshold) {
+            regime = 'TRENDING';
+            confidence = Math.min((adx - adxThreshold) / 30, 1.0);
+        } else {
+            regime = 'RANGING';
+            confidence = Math.min((adxThreshold - adx) / adxThreshold, 1.0);
+        }
+
+        return {
+            regime,
+            adxTrend,
+            atrVolatility,
+            confidence: Math.max(0.3, confidence) // Min 30% confidence
+        };
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // GET ALL INDICATORS
     // Main function - returns complete indicator set for decision making
     // ─────────────────────────────────────────────────────────────────────────
@@ -401,6 +450,11 @@ export class IndicatorCalculator {
             )
             : undefined;
 
+        // Phase 6B: Market regime detection
+        const marketRegime = config.useMarketRegime
+            ? this.detectMarketRegime(adx[lastIndex], atrPercentile, config.adxThreshold)
+            : undefined;
+
         return {
             supertrend: supertrend[lastIndex],
             ema50: ema50[lastIndex],
@@ -410,7 +464,8 @@ export class IndicatorCalculator {
             fundingRate,
             atrPercentile,
             volume,
-            mtf
+            mtf,
+            marketRegime
         };
     }
 }

@@ -88,6 +88,29 @@ export class TradingStrategy {
         // STEP 6: Phase 6A Additional Filters
         // ═══════════════════════════════════════════════════════════════════════
 
+        // Market Regime Filter (Phase 6B)
+        if (this.config.useMarketRegime && indicators.marketRegime) {
+            const regime = indicators.marketRegime.regime;
+
+            // Skip ranging markets if configured
+            if (this.config.skipRangingMarkets && regime === 'RANGING') {
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+
+            // Skip quiet markets (very low volatility)
+            if (regime === 'QUIET') {
+                if (currentPosition) {
+                    return this.checkExitSignal(indicators, currentPosition, currentPrice);
+                }
+                return 'NONE';
+            }
+
+            // Note: VOLATILE regime will be handled in position sizing (reduce size)
+        }
+
         // Trading Hours Filter
         if (this.config.useTradingHours) {
             const allowedSessions = this.config.allowedSessions || ['NY', 'LONDON'];
@@ -234,27 +257,131 @@ export class TradingStrategy {
 
     // ─────────────────────────────────────────────────────────────────────────
     // CALCULATE STOP LOSS & TAKE PROFIT
-    // ATR-based dynamic SL/TP
+    // ATR-based dynamic SL/TP (Phase 6B: Dynamic SL based on volatility)
     // ─────────────────────────────────────────────────────────────────────────
     calculateSLTP(
         side: 'LONG' | 'SHORT',
         entryPrice: number,
-        atr: number
-    ): { stopLoss: number; takeProfit: number } {
-        const slDistance = atr * this.config.risk.stopLossAtrMultiplier;
+        atr: number,
+        atrPercentile?: number
+    ): { stopLoss: number; takeProfit: number; partialTpLevels?: { level1: number; level2: number; level3: number } } {
+        // Phase 6B: Dynamic SL multiplier based on volatility
+        let slMultiplier = this.config.risk.stopLossAtrMultiplier;
+
+        if (this.config.useDynamicSl && atrPercentile !== undefined) {
+            // Low volatility (<30th percentile): tighter SL
+            // High volatility (>70th percentile): wider SL
+            if (atrPercentile < 30) {
+                slMultiplier = this.config.slMultiplierLow || 1.0;
+            } else if (atrPercentile > 70) {
+                slMultiplier = this.config.slMultiplierHigh || 2.0;
+            }
+            // else: use default multiplier
+        }
+
+        const slDistance = atr * slMultiplier;
         const tpDistance = slDistance * this.config.risk.riskRewardRatio;
 
+        let result: { stopLoss: number; takeProfit: number; partialTpLevels?: { level1: number; level2: number; level3: number } };
+
         if (side === 'LONG') {
-            return {
+            result = {
                 stopLoss: entryPrice - slDistance,
                 takeProfit: entryPrice + tpDistance
             };
+
+            // Phase 6B: Partial TP levels
+            if (this.config.usePartialTp && this.config.partialTpLevels) {
+                const level1Distance = slDistance * (this.config.partialTpLevels.level1?.rrRatio || 1.0);
+                const level2Distance = slDistance * (this.config.partialTpLevels.level2?.rrRatio || 1.5);
+                const level3Distance = slDistance * (this.config.partialTpLevels.level3?.rrRatio || 2.0);
+
+                result.partialTpLevels = {
+                    level1: entryPrice + level1Distance,
+                    level2: entryPrice + level2Distance,
+                    level3: entryPrice + level3Distance
+                };
+            }
         } else {
-            return {
+            result = {
                 stopLoss: entryPrice + slDistance,
                 takeProfit: entryPrice - tpDistance
             };
+
+            // Phase 6B: Partial TP levels
+            if (this.config.usePartialTp && this.config.partialTpLevels) {
+                const level1Distance = slDistance * (this.config.partialTpLevels.level1?.rrRatio || 1.0);
+                const level2Distance = slDistance * (this.config.partialTpLevels.level2?.rrRatio || 1.5);
+                const level3Distance = slDistance * (this.config.partialTpLevels.level3?.rrRatio || 2.0);
+
+                result.partialTpLevels = {
+                    level1: entryPrice - level1Distance,
+                    level2: entryPrice - level2Distance,
+                    level3: entryPrice - level3Distance
+                };
+            }
         }
+
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK PARTIAL TP LEVELS (Phase 6B)
+    // Returns which partial TP level was hit, if any
+    // ─────────────────────────────────────────────────────────────────────────
+    checkPartialTP(
+        position: Position,
+        currentPrice: number,
+        partialTpLevels?: { level1: number; level2: number; level3: number }
+    ): { hit: boolean; level: number } | null {
+        if (!partialTpLevels || !position.partialTpLevels) {
+            return null;
+        }
+
+        const hitLevels = position.partialTpLevels || [];
+
+        if (position.side === 'LONG') {
+            // Check level 3 first (highest)
+            if (!hitLevels.includes(3) && currentPrice >= partialTpLevels.level3) {
+                return { hit: true, level: 3 };
+            }
+            if (!hitLevels.includes(2) && currentPrice >= partialTpLevels.level2) {
+                return { hit: true, level: 2 };
+            }
+            if (!hitLevels.includes(1) && currentPrice >= partialTpLevels.level1) {
+                return { hit: true, level: 1 };
+            }
+        } else {
+            // SHORT position
+            if (!hitLevels.includes(3) && currentPrice <= partialTpLevels.level3) {
+                return { hit: true, level: 3 };
+            }
+            if (!hitLevels.includes(2) && currentPrice <= partialTpLevels.level2) {
+                return { hit: true, level: 2 };
+            }
+            if (!hitLevels.includes(1) && currentPrice <= partialTpLevels.level1) {
+                return { hit: true, level: 1 };
+            }
+        }
+
+        return null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CALCULATE POSITION SIZE ADJUSTMENT (Phase 6B)
+    // Adjusts position size based on market regime
+    // ─────────────────────────────────────────────────────────────────────────
+    calculatePositionSizeMultiplier(marketRegime?: { regime: 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET'; confidence: number }): number {
+        if (!this.config.useMarketRegime || !marketRegime) {
+            return 1.0; // No adjustment
+        }
+
+        // Reduce position size in volatile markets
+        if (this.config.reduceInVolatile && marketRegime.regime === 'VOLATILE') {
+            return this.config.volatileReduction || 0.5; // Default: 50% size
+        }
+
+        return 1.0; // Full size in normal conditions
     }
 
     // ─────────────────────────────────────────────────────────────────────────

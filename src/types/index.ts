@@ -38,6 +38,11 @@ export interface Position {
     takeProfit: number;
     entryTime: number;
     unrealizedPnl: number;
+    // Phase 6B: Partial TP tracking
+    initialSize?: number;           // Original position size
+    partialTpLevels?: number[];     // TP levels hit (e.g., [1, 2])
+    remainingSize?: number;         // Current position size after partials
+    peakPrice?: number;             // Peak price for trailing stop
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -69,6 +74,11 @@ export interface SupertrendResult {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// MARKET REGIME
+// ─────────────────────────────────────────────────────────────────────────
+export type MarketRegime = 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
+
+// ─────────────────────────────────────────────────────────────────────────
 // INDICATORS
 // ─────────────────────────────────────────────────────────────────────────
 export interface Indicators {
@@ -95,6 +105,13 @@ export interface Indicators {
         ratio: number;               // current / sma20
         isSurge: boolean;            // volume > 2x SMA
         isAbnormal: boolean;         // volume > 5x SMA (skip entry)
+    };
+    // Phase 6B: Market Regime
+    marketRegime?: {
+        regime: MarketRegime;        // Current market state
+        adxTrend: number;            // ADX for trend strength
+        atrVolatility: number;       // ATR for volatility
+        confidence: number;          // Confidence score (0-1)
     };
 }
 
@@ -161,6 +178,25 @@ export interface BotConfig {
     useTradingHours?: boolean;        // Enable session filtering
     allowedSessions?: ('NY' | 'LONDON' | 'ASIA')[];  // Allowed sessions
     avoidWeekends?: boolean;          // Skip weekend trading
+
+    // Phase 6B: Partial Profit Taking
+    usePartialTp?: boolean;           // Enable scale-out exits
+    partialTpLevels?: {               // TP levels for scaling out
+        level1?: { rrRatio: number; closePercent: number };  // e.g., 1:1, close 50%
+        level2?: { rrRatio: number; closePercent: number };  // e.g., 1.5:1, close 30%
+        level3?: { rrRatio: number; closePercent: number };  // e.g., 2:1, close 20%
+    };
+
+    // Phase 6B: Dynamic Stop Loss
+    useDynamicSl?: boolean;           // Enable volatility-based SL
+    slMultiplierLow?: number;         // SL multiplier in low volatility (e.g., 1.0)
+    slMultiplierHigh?: number;        // SL multiplier in high volatility (e.g., 2.0)
+
+    // Phase 6B: Market Regime
+    useMarketRegime?: boolean;        // Enable regime filtering
+    skipRangingMarkets?: boolean;     // Skip trades in ranging markets
+    reduceInVolatile?: boolean;       // Reduce position size in volatile markets
+    volatileReduction?: number;       // Position reduction % (e.g., 0.5 = 50%)
 
     // Risk management
     risk: RiskConfig;

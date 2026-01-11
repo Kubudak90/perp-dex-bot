@@ -213,7 +213,35 @@ export function loadConfigFromEnv(defaults?: Partial<BotConfig>): BotConfig {
         allowedSessions: process.env.ALLOWED_SESSIONS
             ? process.env.ALLOWED_SESSIONS.split(',').map(s => s.trim() as 'NY' | 'LONDON' | 'ASIA')
             : defaults?.allowedSessions,
-        avoidWeekends: getEnvBoolean('AVOID_WEEKENDS', defaults?.avoidWeekends ?? true)
+        avoidWeekends: getEnvBoolean('AVOID_WEEKENDS', defaults?.avoidWeekends ?? true),
+
+        // Phase 6B: Partial Profit Taking
+        usePartialTp: getEnvBoolean('USE_PARTIAL_TP', defaults?.usePartialTp ?? false),
+        partialTpLevels: {
+            level1: {
+                rrRatio: getEnvNumber('PARTIAL_TP_LEVEL1_RR', defaults?.partialTpLevels?.level1?.rrRatio ?? 1.0),
+                closePercent: getEnvNumber('PARTIAL_TP_LEVEL1_PERCENT', defaults?.partialTpLevels?.level1?.closePercent ?? 50)
+            },
+            level2: {
+                rrRatio: getEnvNumber('PARTIAL_TP_LEVEL2_RR', defaults?.partialTpLevels?.level2?.rrRatio ?? 1.5),
+                closePercent: getEnvNumber('PARTIAL_TP_LEVEL2_PERCENT', defaults?.partialTpLevels?.level2?.closePercent ?? 30)
+            },
+            level3: {
+                rrRatio: getEnvNumber('PARTIAL_TP_LEVEL3_RR', defaults?.partialTpLevels?.level3?.rrRatio ?? 2.0),
+                closePercent: getEnvNumber('PARTIAL_TP_LEVEL3_PERCENT', defaults?.partialTpLevels?.level3?.closePercent ?? 20)
+            }
+        },
+
+        // Phase 6B: Dynamic Stop Loss
+        useDynamicSl: getEnvBoolean('USE_DYNAMIC_SL', defaults?.useDynamicSl ?? false),
+        slMultiplierLow: getEnvNumber('SL_MULTIPLIER_LOW', defaults?.slMultiplierLow ?? 1.0),
+        slMultiplierHigh: getEnvNumber('SL_MULTIPLIER_HIGH', defaults?.slMultiplierHigh ?? 2.0),
+
+        // Phase 6B: Market Regime
+        useMarketRegime: getEnvBoolean('USE_MARKET_REGIME', defaults?.useMarketRegime ?? false),
+        skipRangingMarkets: getEnvBoolean('SKIP_RANGING_MARKETS', defaults?.skipRangingMarkets ?? true),
+        reduceInVolatile: getEnvBoolean('REDUCE_IN_VOLATILE', defaults?.reduceInVolatile ?? true),
+        volatileReduction: getEnvNumber('VOLATILE_REDUCTION', defaults?.volatileReduction ?? 0.5)
     };
 
     // Validate configuration

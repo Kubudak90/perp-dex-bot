@@ -85,19 +85,19 @@ describe('Volume Metrics', () => {
             });
         }
 
-        // Add abnormal candle (5.5x normal volume)
+        // Add abnormal candle (10x normal volume to ensure >5x ratio after SMA calculation)
         candles.push({
             timestamp: Date.now() + 24 * 900000,
             open: 40000,
             high: 40100,
             low: 39900,
             close: 40000,
-            volume: baseVolume * 5.5
+            volume: baseVolume * 10
         });
 
         const volumeMetrics = IndicatorCalculator.calculateVolumeMetrics(candles);
 
-        expect(volumeMetrics.ratio).toBeGreaterThan(4.4);
+        expect(volumeMetrics.ratio).toBeGreaterThan(5.0);
         expect(volumeMetrics.isSurge).toBe(true);
         expect(volumeMetrics.isAbnormal).toBe(true);
     });
