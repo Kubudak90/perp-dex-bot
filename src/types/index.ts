@@ -293,3 +293,45 @@ export interface OrderResult {
     filledSize?: number;
     status?: 'filled' | 'partial' | 'cancelled';
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// PERFORMANCE METRICS (Phase 6D)
+// ─────────────────────────────────────────────────────────────────────────
+export interface PerformanceMetrics {
+    // Basic metrics
+    totalTrades: number;
+    winningTrades: number;
+    losingTrades: number;
+    winRate: number;              // % of winning trades
+
+    // PnL metrics
+    totalPnl: number;
+    totalPnlPercent: number;
+    avgWin: number;
+    avgLoss: number;
+    largestWin: number;
+    largestLoss: number;
+    profitFactor: number;         // Gross profit / Gross loss
+
+    // Risk metrics
+    maxDrawdown: number;          // Maximum peak-to-trough decline ($)
+    maxDrawdownPercent: number;   // Maximum drawdown as %
+    sharpeRatio: number;          // Risk-adjusted returns
+    sortinoRatio: number;         // Downside risk-adjusted returns
+
+    // Trade characteristics
+    avgHoldTime: number;          // Average position duration (ms)
+    avgTradeDuration: number;     // Same as above (hours)
+    maxConsecutiveWins: number;
+    maxConsecutiveLosses: number;
+
+    // Equity curve
+    finalEquity: number;
+    peakEquity: number;
+    returnOnInvestment: number;   // %
+
+    // Advanced
+    expectancy: number;           // Average $ per trade
+    recoveryFactor: number;       // Net profit / Max drawdown
+    calmarRatio: number;          // Annual return / Max drawdown
+}
