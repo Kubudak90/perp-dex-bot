@@ -135,9 +135,9 @@ function analyzeStrategy(stats: any): string[] {
     }
 
     // Exit reasons
-    const exitReasons = stats.exitReasons;
-    const tpCount = exitReasons['TP'] || 0;
-    const slCount = exitReasons['SL'] || 0;
+    const exitReasonBreakdown = stats.exitReasonBreakdown;
+    const tpCount = exitReasonBreakdown['TP'] || 0;
+    const slCount = exitReasonBreakdown['SL'] || 0;
 
     if (tpCount > slCount * 1.5) {
         insights.push('✅ Taking profits effectively - More TP exits than SL');
