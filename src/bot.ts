@@ -27,7 +27,12 @@ export class PerpBot {
     private riskManager: RiskManager;
     private exchange: IExchange;
     private logger: Logger;
-    private isRunning: boolean = false;
+    private _isRunning: boolean = false;
+
+    // Public getter for dashboard
+    get isRunning(): boolean {
+        return this._isRunning;
+    }
 
     // Phase 3 services (optional)
     private notificationService?: NotificationService;
@@ -91,10 +96,10 @@ export class PerpBot {
     // MAIN LOOP
     // ─────────────────────────────────────────────────────────────────────────
     async start(): Promise<void> {
-        this.isRunning = true;
+        this._isRunning = true;
         this.logger.info('🚀 Bot started');
 
-        while (this.isRunning) {
+        while (this._isRunning) {
             try {
                 await this.tick();
                 await this.sleep(this.getTickInterval());
@@ -115,7 +120,7 @@ export class PerpBot {
     }
 
     stop(): void {
-        this.isRunning = false;
+        this._isRunning = false;
         this.logger.info('🛑 Bot stopped');
     }
 

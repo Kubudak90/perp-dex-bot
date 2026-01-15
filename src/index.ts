@@ -12,6 +12,7 @@ import { NotificationService } from './utils/notifications';
 import { DatabaseService } from './utils/database';
 import { AnalyticsService } from './utils/analytics';
 import { Logger } from './utils/logger';
+import { Dashboard } from './dashboard';
 
 dotenvConfig();
 
@@ -172,10 +173,33 @@ async function main() {
         // ─────────────────────────────────────────────────────────────────────────
         const bot = new PerpBot(config, exchange, services);
 
+        // ─────────────────────────────────────────────────────────────────────────
+        // START DASHBOARD
+        // ─────────────────────────────────────────────────────────────────────────
+        let dashboard: Dashboard | null = null;
+        const dashboardEnabled = process.env.DASHBOARD_ENABLED === 'true';
+        const dashboardPort = parseInt(process.env.DASHBOARD_PORT || '3000', 10);
+
+        if (dashboardEnabled) {
+            dashboard = new Dashboard(
+                { port: dashboardPort, enabled: true },
+                {
+                    getState: () => bot.getState(),
+                    getConfig: () => ({ ...config, mode: modeConfig.mode, paperBalance: modeConfig.initialBalance }),
+                    onStartBot: async () => { await bot.start(); },
+                    onStopBot: async () => { bot.stop(); },
+                    isRunning: () => bot.isRunning
+                }
+            );
+            dashboard.start();
+            console.log(`🌐 Dashboard: http://localhost:${dashboardPort}`);
+        }
+
         // Graceful shutdown
         process.on('SIGINT', () => {
             console.log('\n🛑 Shutting down...');
             bot.stop();
+            if (dashboard) dashboard.stop();
 
             // Close database connection
             if (services.database) {
@@ -188,6 +212,7 @@ async function main() {
         process.on('SIGTERM', () => {
             console.log('\n🛑 Shutting down...');
             bot.stop();
+            if (dashboard) dashboard.stop();
 
             // Close database connection
             if (services.database) {
