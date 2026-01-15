@@ -368,6 +368,23 @@ export class HyperliquidConnector implements IExchange {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// SLIPPAGE MODEL
+// ─────────────────────────────────────────────────────────────────────────
+export interface SlippageConfig {
+    baseSlippage: number;          // Base slippage % (e.g., 0.05 = 0.05%)
+    volumeImpact: number;          // Additional slippage per $10k volume
+    volatilityMultiplier: number;  // Multiplier based on ATR
+    maxSlippage: number;           // Maximum slippage cap %
+}
+
+const DEFAULT_SLIPPAGE: SlippageConfig = {
+    baseSlippage: 0.03,            // 0.03% base slippage
+    volumeImpact: 0.01,            // +0.01% per $10k
+    volatilityMultiplier: 1.5,     // 1.5x in high volatility
+    maxSlippage: 0.5               // 0.5% max slippage
+};
+
+// ─────────────────────────────────────────────────────────────────────────
 // MOCK EXCHANGE (for backtesting/paper trading)
 // ─────────────────────────────────────────────────────────────────────────
 export class MockExchange implements IExchange {
@@ -376,10 +393,68 @@ export class MockExchange implements IExchange {
     private position: Position | null = null;
     private candles: Candle[] = [];
     private currentIndex: number = 0;
+    private slippageConfig: SlippageConfig;
+    private recentVolatility: number = 0;
 
-    constructor(initialBalance: number) {
+    constructor(initialBalance: number, slippageConfig?: Partial<SlippageConfig>) {
         this.logger = new Logger('MockExchange');
         this.balance = initialBalance;
+        this.slippageConfig = { ...DEFAULT_SLIPPAGE, ...slippageConfig };
+    }
+
+    // Calculate realistic slippage based on order size and market conditions
+    private calculateSlippage(
+        side: 'LONG' | 'SHORT' | 'CLOSE',
+        orderValue: number,
+        basePrice: number
+    ): number {
+        // Base slippage
+        let slippage = this.slippageConfig.baseSlippage;
+
+        // Volume impact: larger orders have more slippage
+        const volumeImpact = (orderValue / 10000) * this.slippageConfig.volumeImpact;
+        slippage += volumeImpact;
+
+        // Volatility adjustment: high volatility = more slippage
+        if (this.recentVolatility > 0.02) { // >2% ATR
+            slippage *= this.slippageConfig.volatilityMultiplier;
+        }
+
+        // Random component (market microstructure noise)
+        const randomFactor = 0.5 + Math.random(); // 0.5x to 1.5x
+        slippage *= randomFactor;
+
+        // Cap at max slippage
+        slippage = Math.min(slippage, this.slippageConfig.maxSlippage);
+
+        // Apply slippage direction (buy = pay more, sell = receive less)
+        const slippagePercent = slippage / 100;
+        if (side === 'LONG') {
+            return basePrice * (1 + slippagePercent); // Worse entry for longs
+        } else {
+            return basePrice * (1 - slippagePercent); // Worse exit/entry for shorts
+        }
+    }
+
+    // Update volatility estimate from recent candles
+    updateVolatility(): void {
+        if (this.currentIndex < 14) return;
+
+        const recentCandles = this.candles.slice(this.currentIndex - 14, this.currentIndex);
+        let sumTr = 0;
+
+        for (let i = 1; i < recentCandles.length; i++) {
+            const tr = Math.max(
+                recentCandles[i].high - recentCandles[i].low,
+                Math.abs(recentCandles[i].high - recentCandles[i - 1].close),
+                Math.abs(recentCandles[i].low - recentCandles[i - 1].close)
+            );
+            sumTr += tr;
+        }
+
+        const atr = sumTr / (recentCandles.length - 1);
+        const avgPrice = recentCandles[recentCandles.length - 1].close;
+        this.recentVolatility = atr / avgPrice; // ATR as percentage
     }
 
     async connect(): Promise<void> {
@@ -422,11 +497,16 @@ export class MockExchange implements IExchange {
         size: number,
         _leverage: number
     ): Promise<{ orderId: string; avgPrice: number }> {
-        const price = await this.getMarkPrice(symbol);
+        const basePrice = await this.getMarkPrice(symbol);
+        const orderValue = size * basePrice;
+
+        // Update volatility and calculate slippage
+        this.updateVolatility();
+        const fillPrice = this.calculateSlippage(side, orderValue, basePrice);
 
         this.position = {
             side,
-            entryPrice: price,
+            entryPrice: fillPrice,
             size,
             stopLoss: 0,
             takeProfit: 0,
@@ -434,31 +514,39 @@ export class MockExchange implements IExchange {
             unrealizedPnl: 0
         };
 
-        this.logger.trade(side, price, `Mock position opened`);
+        const slippageBps = Math.abs((fillPrice - basePrice) / basePrice * 10000).toFixed(1);
+        this.logger.trade(side, fillPrice, `Mock position opened (slippage: ${slippageBps} bps)`);
 
-        return { orderId: `mock_${Date.now()}`, avgPrice: price };
+        return { orderId: `mock_${Date.now()}`, avgPrice: fillPrice };
     }
 
     async closePosition(
         symbol: string,
         position: Position
     ): Promise<{ orderId: string; avgPrice: number }> {
-        const price = await this.getMarkPrice(symbol);
+        const basePrice = await this.getMarkPrice(symbol);
+        const orderValue = position.size * basePrice;
 
-        // Calculate PnL
+        // Calculate slippage for exit (opposite direction of position)
+        this.updateVolatility();
+        const closeSide = position.side === 'LONG' ? 'SHORT' : 'LONG';
+        const fillPrice = this.calculateSlippage(closeSide as 'LONG' | 'SHORT', orderValue, basePrice);
+
+        // Calculate PnL with actual fill price
         let pnl: number;
         if (position.side === 'LONG') {
-            pnl = (price - position.entryPrice) * position.size;
+            pnl = (fillPrice - position.entryPrice) * position.size;
         } else {
-            pnl = (position.entryPrice - price) * position.size;
+            pnl = (position.entryPrice - fillPrice) * position.size;
         }
 
         this.balance += pnl;
         this.position = null;
 
-        this.logger.trade('CLOSE', price, `Mock position closed. PnL: ${pnl.toFixed(2)}`);
+        const slippageBps = Math.abs((fillPrice - basePrice) / basePrice * 10000).toFixed(1);
+        this.logger.trade('CLOSE', fillPrice, `Mock position closed. PnL: ${pnl.toFixed(2)} (slippage: ${slippageBps} bps)`);
 
-        return { orderId: `mock_close_${Date.now()}`, avgPrice: price };
+        return { orderId: `mock_close_${Date.now()}`, avgPrice: fillPrice };
     }
 
     async setStopLoss(_symbol: string, stopPrice: number): Promise<void> {

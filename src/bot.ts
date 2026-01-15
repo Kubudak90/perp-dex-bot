@@ -3,7 +3,7 @@
 // Coordinates strategy, risk, and exchange
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { BotConfig, BotState, Signal, TradeResult } from './types';
+import { BotConfig, BotState, Signal, TradeResult, StrategyType, MarketRegime } from './types';
 import type { Position } from './types';
 import { IndicatorCalculator } from './indicators';
 import { TradingStrategy } from './strategies';
@@ -163,8 +163,21 @@ export class PerpBot {
             // Phase 2: Check if position should be force-closed (max hold time)
             if (this.riskManager.shouldForceClose(this.state.position)) {
                 this.logger.warn('⏰ Max hold time reached - Force closing position');
-                await this.executeClose(currentPrice, 'SIGNAL');
+                await this.executeClose(currentPrice, 'FORCE_CLOSE');
                 return;
+            }
+
+            // Phase 6B: Check partial TP levels
+            if (this.config.usePartialTp && this.state.position.partialTpPrices) {
+                const partialTpCheck = this.strategy.checkPartialTP(
+                    this.state.position,
+                    currentPrice,
+                    this.state.position.partialTpPrices
+                );
+
+                if (partialTpCheck && partialTpCheck.hit) {
+                    await this.executePartialClose(currentPrice, partialTpCheck.level);
+                }
             }
 
             // Check SL/TP
@@ -175,11 +188,11 @@ export class PerpBot {
             }
         }
 
-        // 4. Generate signal
+        // 4. Generate signal (with market regime info for strategy selection)
         const signal = this.strategy.generateSignal(indicators, this.state.position, currentPrice);
 
-        // 5. Execute signal
-        await this.executeSignal(signal, currentPrice, indicators.atr);
+        // 5. Execute signal (pass indicators for dynamic SL and regime-based sizing)
+        await this.executeSignal(signal, currentPrice, indicators.atr, indicators);
 
         // Debug output (every tick)
         this.logger.debug(this.strategy.getStateDebug(indicators));
@@ -191,7 +204,8 @@ export class PerpBot {
     private async executeSignal(
         signal: Signal,
         currentPrice: number,
-        atr: number
+        atr: number,
+        indicators?: { atrPercentile?: number; marketRegime?: { regime: MarketRegime; confidence: number } }
     ): Promise<void> {
         if (signal === 'NONE') return;
 
@@ -201,14 +215,14 @@ export class PerpBot {
         }
 
         if (signal === 'LONG' || signal === 'SHORT') {
-            // Check risk limits
+            // Check risk limits (includes consecutive losses check)
             const riskCheck = this.riskManager.canOpenPosition(this.state);
             if (!riskCheck.allowed) {
                 this.logger.warn(`Trade blocked: ${riskCheck.reason}`);
                 return;
             }
 
-            await this.executeOpen(signal, currentPrice, atr);
+            await this.executeOpen(signal, currentPrice, atr, indicators);
         }
     }
 
@@ -218,18 +232,27 @@ export class PerpBot {
     private async executeOpen(
         side: 'LONG' | 'SHORT',
         currentPrice: number,
-        atr: number
+        atr: number,
+        indicators?: { atrPercentile?: number; marketRegime?: { regime: MarketRegime; confidence: number } }
     ): Promise<void> {
-        // Calculate SL/TP
-        const { stopLoss, takeProfit } = this.strategy.calculateSLTP(side, currentPrice, atr);
+        // Calculate SL/TP with dynamic SL based on volatility (Phase 6B)
+        const sltpResult = this.strategy.calculateSLTP(side, currentPrice, atr, indicators?.atrPercentile);
+        const { stopLoss, takeProfit, partialTpLevels } = sltpResult;
 
         // Calculate position size
-        const positionSize = this.riskManager.calculatePositionSize(
+        let positionSize = this.riskManager.calculatePositionSize(
             this.state.equity,
             currentPrice,
             stopLoss,
             this.config.leverage
         );
+
+        // Phase 6B: Adjust position size based on market regime
+        const sizeMultiplier = this.strategy.calculatePositionSizeMultiplier(indicators?.marketRegime);
+        if (sizeMultiplier !== 1.0) {
+            positionSize = positionSize * sizeMultiplier;
+            this.logger.info(`📊 Position size adjusted by ${(sizeMultiplier * 100).toFixed(0)}% due to ${indicators?.marketRegime?.regime} regime`);
+        }
 
         // Execute order
         const result = await this.exchange.openPosition(
@@ -239,7 +262,10 @@ export class PerpBot {
             this.config.leverage
         );
 
-        // Update state
+        // Determine current strategy type based on market regime
+        const currentStrategy: StrategyType = this.determineStrategyType(indicators?.marketRegime?.regime);
+
+        // Update state with all tracking fields
         this.state.position = {
             side,
             entryPrice: result.avgPrice,
@@ -247,7 +273,15 @@ export class PerpBot {
             stopLoss,
             takeProfit,
             entryTime: Date.now(),
-            unrealizedPnl: 0
+            unrealizedPnl: 0,
+            // Phase 6B: Partial TP tracking
+            initialSize: positionSize,
+            remainingSize: positionSize,
+            partialTpLevels: [],
+            partialTpPrices: partialTpLevels,
+            // Strategy tracking
+            strategy: currentStrategy,
+            marketRegimeAtEntry: indicators?.marketRegime?.regime
         };
 
         // Phase 2: Initialize peak price for trailing stop
@@ -267,7 +301,8 @@ export class PerpBot {
         await this.exchange.setStopLoss(this.config.symbol, stopLoss);
         await this.exchange.setTakeProfit(this.config.symbol, takeProfit);
 
-        this.logger.trade(side, result.avgPrice, `SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}`);
+        const regimeInfo = indicators?.marketRegime ? ` | Regime: ${indicators.marketRegime.regime}` : '';
+        this.logger.trade(side, result.avgPrice, `SL: ${stopLoss.toFixed(2)} | TP: ${takeProfit.toFixed(2)}${regimeInfo}`);
 
         // Phase 3: Send notification
         if (this.notificationService) {
@@ -283,11 +318,97 @@ export class PerpBot {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
+    // DETERMINE STRATEGY TYPE based on market regime
+    // ─────────────────────────────────────────────────────────────────────────
+    private determineStrategyType(regime?: MarketRegime): StrategyType {
+        if (!regime) return 'SUPERTREND';
+
+        switch (regime) {
+            case 'TRENDING':
+                return 'SUPERTREND';  // Trend following works best
+            case 'VOLATILE':
+                return 'MOMENTUM';     // Quick momentum plays in volatility
+            case 'RANGING':
+                return 'MEAN_REVERSION'; // Buy low, sell high in ranges
+            case 'QUIET':
+                return 'SCALP';        // Small moves, tight stops
+            default:
+                return 'SUPERTREND';
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PARTIAL CLOSE (Phase 6B)
+    // ─────────────────────────────────────────────────────────────────────────
+    private async executePartialClose(currentPrice: number, tpLevel: number): Promise<void> {
+        if (!this.state.position || !this.config.partialTpLevels) return;
+
+        // Determine how much to close based on level
+        const levelConfig = tpLevel === 1
+            ? this.config.partialTpLevels.level1
+            : tpLevel === 2
+                ? this.config.partialTpLevels.level2
+                : this.config.partialTpLevels.level3;
+
+        if (!levelConfig) return;
+
+        const closePercent = levelConfig.closePercent / 100;
+        const initialSize = this.state.position.initialSize || this.state.position.size;
+        const closeSize = initialSize * closePercent;
+
+        // Calculate PnL for this partial close
+        const { pnl, pnlPercent } = this.riskManager.calculatePnl(
+            { ...this.state.position, size: closeSize },
+            currentPrice,
+            this.config.leverage
+        );
+
+        // Update position
+        this.state.position.size -= closeSize;
+        this.state.position.remainingSize = this.state.position.size;
+        this.state.position.partialTpLevels = [
+            ...(this.state.position.partialTpLevels || []),
+            tpLevel
+        ];
+
+        // Update equity
+        this.state.equity += pnl;
+        this.state.dailyPnl += pnl;
+
+        this.logger.info(
+            `📈 Partial TP Level ${tpLevel} hit! Closed ${(closePercent * 100).toFixed(0)}% @ ${currentPrice.toFixed(2)} | ` +
+            `PnL: $${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%) | Remaining: ${(this.state.position.size * 100 / initialSize).toFixed(0)}%`
+        );
+
+        // Move stop loss to breakeven after first partial TP
+        if (tpLevel === 1 && this.state.position.entryPrice) {
+            const breakEvenSL = this.state.position.side === 'LONG'
+                ? this.state.position.entryPrice * 1.001  // Slightly above entry
+                : this.state.position.entryPrice * 0.999; // Slightly below entry
+
+            if ((this.state.position.side === 'LONG' && breakEvenSL > this.state.position.stopLoss) ||
+                (this.state.position.side === 'SHORT' && breakEvenSL < this.state.position.stopLoss)) {
+                this.state.position.stopLoss = breakEvenSL;
+                await this.exchange.setStopLoss(this.config.symbol, breakEvenSL);
+                this.logger.info(`🛡️ Stop loss moved to breakeven: ${breakEvenSL.toFixed(2)}`);
+            }
+        }
+
+        // Send notification
+        if (this.notificationService) {
+            await this.notificationService.notifyRiskAlert(
+                `Partial TP ${tpLevel}/3 hit! PnL: $${pnl.toFixed(2)}`,
+                'info'
+            ).catch(err => this.logger.error('Failed to send partial TP notification', err as Error));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
     // CLOSE POSITION
     // ─────────────────────────────────────────────────────────────────────────
     private async executeClose(
         _currentPrice: number,
-        reason: 'SL' | 'TP' | 'SIGNAL'
+        reason: 'SL' | 'TP' | 'SIGNAL' | 'FORCE_CLOSE'
     ): Promise<void> {
         if (!this.state.position) return;
 

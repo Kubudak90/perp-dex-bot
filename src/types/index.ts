@@ -28,6 +28,16 @@ export interface MarketData {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// MARKET REGIME (moved here for proper ordering)
+// ─────────────────────────────────────────────────────────────────────────
+export type MarketRegime = 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
+
+// ─────────────────────────────────────────────────────────────────────────
+// STRATEGY TYPES (moved here for proper ordering)
+// ─────────────────────────────────────────────────────────────────────────
+export type StrategyType = 'SUPERTREND' | 'BREAKOUT' | 'MEAN_REVERSION' | 'MOMENTUM' | 'SCALP';
+
+// ─────────────────────────────────────────────────────────────────────────
 // POSITION
 // ─────────────────────────────────────────────────────────────────────────
 export interface Position {
@@ -43,6 +53,15 @@ export interface Position {
     partialTpLevels?: number[];     // TP levels hit (e.g., [1, 2])
     remainingSize?: number;         // Current position size after partials
     peakPrice?: number;             // Peak price for trailing stop
+    // Partial TP price levels
+    partialTpPrices?: {
+        level1: number;
+        level2: number;
+        level3: number;
+    };
+    // Strategy tracking
+    strategy?: StrategyType;
+    marketRegimeAtEntry?: MarketRegime;
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -55,13 +74,37 @@ export interface TradeResult {
     pnl: number;
     pnlPercent: number;
     duration: number;
-    exitReason: 'SL' | 'TP' | 'SIGNAL';
+    exitReason: 'SL' | 'TP' | 'SIGNAL' | 'PARTIAL_TP' | 'FORCE_CLOSE';
+    // Enhanced tracking
+    strategy?: StrategyType;
+    marketRegime?: MarketRegime;
+    partialTpLevel?: number;      // Which partial TP level was hit (1, 2, or 3)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
 // SIGNAL TYPES
 // ─────────────────────────────────────────────────────────────────────────
 export type Signal = 'LONG' | 'SHORT' | 'CLOSE' | 'NONE';
+
+// ─────────────────────────────────────────────────────────────────────────
+// STRATEGY SELECTION & PERFORMANCE
+// ─────────────────────────────────────────────────────────────────────────
+export interface StrategySelection {
+    strategy: StrategyType;
+    reason: string;
+    confidence: number;        // 0-1
+    suggestedLeverage: number; // Adaptive leverage based on conditions
+    suggestedSizeMultiplier: number; // Position size adjustment
+}
+
+export interface StrategyPerformance {
+    strategy: StrategyType;
+    trades: number;
+    winRate: number;
+    avgPnl: number;
+    profitFactor: number;
+    lastUsed: number;
+}
 
 // ─────────────────────────────────────────────────────────────────────────
 // SUPERTREND RESULT
@@ -72,11 +115,6 @@ export interface SupertrendResult {
     upperBand: number;
     lowerBand: number;
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// MARKET REGIME
-// ─────────────────────────────────────────────────────────────────────────
-export type MarketRegime = 'TRENDING' | 'RANGING' | 'VOLATILE' | 'QUIET';
 
 // ─────────────────────────────────────────────────────────────────────────
 // EXTERNAL DATA (Phase 6C)

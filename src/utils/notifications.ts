@@ -136,10 +136,16 @@ export class NotificationService {
         });
     }
 
-    async notifyRiskAlert(message: string, severity: 'warning' | 'error' = 'warning'): Promise<void> {
+    async notifyRiskAlert(message: string, severity: 'info' | 'warning' | 'error' = 'warning'): Promise<void> {
+        const titles: Record<string, string> = {
+            'info': '📊 Trading Update',
+            'warning': '⚠️ Risk Alert',
+            'error': '🚨 Critical Alert'
+        };
+
         await this.sendAlert({
             type: 'risk',
-            title: '⚠️ Risk Alert',
+            title: titles[severity] || '⚠️ Risk Alert',
             message,
             severity
         });

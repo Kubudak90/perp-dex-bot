@@ -42,6 +42,28 @@ export class RiskManager {
             };
         }
 
+        // Consecutive losses check (Phase 2 enhancement)
+        if (this.config.maxConsecutiveLosses) {
+            const consecutiveLosses = state.consecutiveLosses || 0;
+            if (consecutiveLosses >= this.config.maxConsecutiveLosses) {
+                return {
+                    allowed: false,
+                    reason: `Consecutive loss limit hit: ${consecutiveLosses}/${this.config.maxConsecutiveLosses}. Wait for daily reset.`
+                };
+            }
+        }
+
+        // Portfolio heat check (Phase 2 enhancement)
+        if (this.config.maxPortfolioHeat) {
+            const portfolioHeat = state.portfolioHeat || 0;
+            if (portfolioHeat >= this.config.maxPortfolioHeat) {
+                return {
+                    allowed: false,
+                    reason: `Portfolio heat limit hit: ${portfolioHeat.toFixed(2)}% (max: ${this.config.maxPortfolioHeat}%)`
+                };
+            }
+        }
+
         // Cooldown after loss
         if (state.lastLossTime > 0) {
             const cooldownMs = this.config.cooldownMinutes * 60 * 1000;
