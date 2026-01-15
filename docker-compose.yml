@@ -1,0 +1,42 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# PERP DEX BOT - DOCKER COMPOSE
+# ═══════════════════════════════════════════════════════════════════════════
+
+version: '3.8'
+
+services:
+  perp-bot:
+    build: .
+    container_name: perp-dex-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist SQLite database
+      - ./data:/app/data
+      # Persist logs (optional)
+      - ./logs:/app/logs
+    environment:
+      - NODE_ENV=production
+      - TZ=UTC
+    # Resource limits (adjust based on your VPS)
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Health check
+    healthcheck:
+      test: ["CMD", "node", "-e", "console.log('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
