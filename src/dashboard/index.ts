@@ -4,8 +4,10 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import http from 'http';
-import { BotState, TradeResult, ExchangeType, ExchangeConfig } from '../types';
+import { BotState, TradeResult, ExchangeType } from '../types';
 import { Logger } from '../utils/logger';
+import { authService, rateLimiters, extractToken, getClientIP } from '../utils/auth';
+import { googleOAuth } from '../utils/auth/google';
 
 export interface DashboardConfig {
     port: number;
@@ -86,7 +88,7 @@ export class Dashboard {
         this.server = http.createServer(async (req, res) => {
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Wallet-Address');
+            res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Wallet-Address');
 
             if (req.method === 'OPTIONS') {
                 res.writeHead(200);
@@ -95,8 +97,34 @@ export class Dashboard {
             }
 
             const url = req.url || '/';
+            const clientIP = getClientIP(req as any);
 
             try {
+                // Rate limiting for API endpoints
+                if (url.startsWith('/api/')) {
+                    const isAuthEndpoint = url.startsWith('/api/auth/') || url === '/api/connect';
+                    const isBotControl = url === '/api/start' || url === '/api/stop';
+
+                    const limiter = isAuthEndpoint ? rateLimiters.auth :
+                                    isBotControl ? rateLimiters.botControl :
+                                    rateLimiters.api;
+
+                    const rateCheck = limiter.check(clientIP);
+                    if (!rateCheck.allowed) {
+                        res.writeHead(429, {
+                            'Content-Type': 'application/json',
+                            'Retry-After': String(Math.ceil(rateCheck.resetIn / 1000))
+                        });
+                        res.end(JSON.stringify({
+                            success: false,
+                            message: 'Too many requests',
+                            retryAfter: Math.ceil(rateCheck.resetIn / 1000)
+                        }));
+                        return;
+                    }
+                }
+
+                // Route handling
                 if (url === '/api/status') {
                     this.handleApiStatus(res);
                 } else if (url === '/api/trades') {
@@ -111,6 +139,21 @@ export class Dashboard {
                     await this.handleWalletConnect(req, res);
                 } else if (url === '/api/profile' && req.method === 'GET') {
                     this.handleGetProfile(req, res);
+                // Auth endpoints
+                } else if (url === '/api/auth/nonce' && req.method === 'POST') {
+                    await this.handleGetNonce(req, res);
+                } else if (url === '/api/auth/verify' && req.method === 'POST') {
+                    await this.handleVerifySignature(req, res);
+                } else if (url === '/api/auth/refresh' && req.method === 'POST') {
+                    await this.handleRefreshToken(req, res);
+                } else if (url === '/api/auth/logout' && req.method === 'POST') {
+                    await this.handleLogout(req, res);
+                } else if (url === '/api/auth/google/url' && req.method === 'GET') {
+                    this.handleGoogleAuthUrl(req, res);
+                } else if (url.startsWith('/auth/google/callback')) {
+                    await this.handleGoogleCallback(req, res);
+                } else if (url === '/api/auth/google/link' && req.method === 'POST') {
+                    await this.handleGoogleLink(req, res);
                 } else if (url === '/health') {
                     res.writeHead(200);
                     res.end('OK');
@@ -258,6 +301,234 @@ export class Dashboard {
             this.currentCredentials = null;
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: true, message: 'Bot stopped' }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // AUTH HANDLERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private async handleGetNonce(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const { walletAddress } = body;
+
+            if (!walletAddress) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Wallet address required' }));
+                return;
+            }
+
+            const nonce = authService.generateNonce(walletAddress);
+            const message = `Sign this message to authenticate with Perp DEX Bot.\n\nNonce: ${nonce}\nTimestamp: ${new Date().toISOString()}`;
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, nonce, message }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handleVerifySignature(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const { walletAddress, walletType, chain, signature, message } = body;
+
+            if (!walletAddress || !signature || !message) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Missing required fields' }));
+                return;
+            }
+
+            const session = await authService.authenticate(
+                walletAddress,
+                walletType || 'metamask',
+                chain || 'evm',
+                signature,
+                message
+            );
+
+            if (!session) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Invalid signature' }));
+                return;
+            }
+
+            // Also update connectedProfiles for backward compatibility
+            this.connectedProfiles.set(walletAddress.toLowerCase(), {
+                walletAddress: walletAddress.toLowerCase(),
+                walletType: walletType || 'metamask',
+                chain: chain || 'evm',
+                createdAt: session.user.createdAt,
+                lastLogin: session.user.lastLogin
+            });
+
+            this.logger.info(`User authenticated: ${walletAddress.slice(0, 10)}...`);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                token: session.token,
+                expiresAt: session.expiresAt,
+                user: {
+                    address: session.user.walletAddress,
+                    shortAddress: `${session.user.walletAddress.slice(0, 6)}...${session.user.walletAddress.slice(-4)}`,
+                    walletType: session.user.walletType,
+                    chain: session.user.chain,
+                    email: session.user.email,
+                    googleLinked: !!session.user.googleId
+                }
+            }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handleRefreshToken(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const token = extractToken(req.headers.authorization as string);
+            if (!token) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'No token provided' }));
+                return;
+            }
+
+            const newToken = authService.refreshToken(token);
+            if (!newToken) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Invalid or expired token' }));
+                return;
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, token: newToken }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handleLogout(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const token = extractToken(req.headers.authorization as string);
+            if (token) {
+                authService.revokeToken(token);
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Logged out' }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleGoogleAuthUrl(req: http.IncomingMessage, res: http.ServerResponse): void {
+        const walletAddress = req.headers['x-wallet-address'] as string;
+
+        if (!walletAddress) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: 'Wallet address required' }));
+            return;
+        }
+
+        if (!googleOAuth.isConfigured()) {
+            res.writeHead(501, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: false,
+                message: 'Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET.'
+            }));
+            return;
+        }
+
+        const url = googleOAuth.getAuthorizationUrl(walletAddress);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, url }));
+    }
+
+    private async handleGoogleCallback(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+            const code = urlObj.searchParams.get('code');
+            const state = urlObj.searchParams.get('state');
+            const error = urlObj.searchParams.get('error');
+
+            if (error) {
+                res.writeHead(302, { Location: '/?error=google_auth_failed' });
+                res.end();
+                return;
+            }
+
+            if (!code || !state) {
+                res.writeHead(302, { Location: '/?error=invalid_callback' });
+                res.end();
+                return;
+            }
+
+            const result = await googleOAuth.exchangeCodeForTokens(code, state);
+            if (!result) {
+                res.writeHead(302, { Location: '/?error=token_exchange_failed' });
+                res.end();
+                return;
+            }
+
+            const userInfo = await googleOAuth.getUserInfo(result.tokens.access_token);
+            if (!userInfo) {
+                res.writeHead(302, { Location: '/?error=user_info_failed' });
+                res.end();
+                return;
+            }
+
+            // Link Google account to wallet
+            authService.linkGoogleAccount(result.walletAddress, userInfo.id, userInfo.email);
+
+            this.logger.success(`Google linked: ${userInfo.email} -> ${result.walletAddress.slice(0, 10)}...`);
+
+            // Redirect back to dashboard with success
+            res.writeHead(302, { Location: '/?google_linked=true' });
+            res.end();
+        } catch (error) {
+            this.logger.error('Google callback error', error as Error);
+            res.writeHead(302, { Location: '/?error=callback_error' });
+            res.end();
+        }
+    }
+
+    private async handleGoogleLink(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const { idToken, walletAddress } = body;
+
+            if (!idToken || !walletAddress) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'ID token and wallet address required' }));
+                return;
+            }
+
+            const userInfo = await googleOAuth.verifyIdToken(idToken);
+            if (!userInfo) {
+                res.writeHead(401, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Invalid Google ID token' }));
+                return;
+            }
+
+            const linked = authService.linkGoogleAccount(walletAddress, userInfo.id, userInfo.email);
+            if (!linked) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Failed to link account' }));
+                return;
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                email: userInfo.email,
+                message: 'Google account linked successfully'
+            }));
         } catch (error) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, message: (error as Error).message }));
