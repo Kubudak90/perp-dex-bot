@@ -4,6 +4,33 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ─────────────────────────────────────────────────────────────────────────
+// EXCHANGE TYPES
+// Supported perpetual DEX exchanges
+// ─────────────────────────────────────────────────────────────────────────
+export type ExchangeType = 'NADO' | 'STANDX' | 'GRVT' | 'PACIFICA' | 'MOCK';
+
+export interface ExchangeConfig {
+    exchange: ExchangeType;
+    // Nado (Ink L2 - Kraken)
+    nadoApiUrl?: string;
+    nadoWsUrl?: string;
+    // StandX (Solana/BNB)
+    standxApiUrl?: string;
+    standxChain?: 'solana' | 'bnb';
+    // GRVT (zkSync)
+    grvtApiUrl?: string;
+    grvtApiKey?: string;
+    grvtSubAccountId?: string;
+    // Pacifica (Solana)
+    pacificaApiUrl?: string;
+    pacificaApiKey?: string;
+    // Common
+    privateKey?: string;
+    walletAddress?: string;
+    testnet?: boolean;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // CANDLE DATA
 // ─────────────────────────────────────────────────────────────────────────
 export interface Candle {

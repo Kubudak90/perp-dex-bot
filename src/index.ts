@@ -4,8 +4,9 @@
 
 import { config as dotenvConfig } from 'dotenv';
 import { PerpBot, BotServices } from './bot';
-import { BotConfig } from './types';
-import { HyperliquidConnector, MockExchange } from './utils/exchange';
+import { BotConfig, ExchangeType, ExchangeConfig } from './types';
+import { MockExchange } from './utils/exchange';
+import { createExchange } from './utils/exchanges';
 import { loadConfigFromEnv, validateMode, printConfigSummary } from './utils/config';
 import { logError } from './utils/errors';
 import { NotificationService } from './utils/notifications';
@@ -88,12 +89,33 @@ async function main() {
         let exchange;
 
         if (mode === 'live') {
-            exchange = new HyperliquidConnector(
-                modeConfig.privateKey,
-                modeConfig.walletAddress,
-                modeConfig.testnet
-            );
-            console.log('⚠️  LIVE MODE - Real money at risk!');
+            // Get exchange type from environment
+            const exchangeType = (process.env.EXCHANGE || 'NADO').toUpperCase() as ExchangeType;
+            const isTestnet = process.env.TESTNET !== 'false';
+
+            // Build exchange config from environment
+            const exchangeConfig: ExchangeConfig = {
+                exchange: exchangeType,
+                testnet: isTestnet,
+                privateKey: modeConfig.privateKey,
+                walletAddress: modeConfig.walletAddress,
+                // Nado
+                nadoApiUrl: process.env.NADO_API_URL,
+                nadoWsUrl: process.env.NADO_WS_URL,
+                // GRVT
+                grvtApiUrl: process.env.GRVT_API_URL,
+                grvtApiKey: process.env.GRVT_API_KEY,
+                grvtSubAccountId: process.env.GRVT_SUB_ACCOUNT_ID,
+                // Pacifica
+                pacificaApiUrl: process.env.PACIFICA_API_URL,
+                pacificaApiKey: process.env.PACIFICA_API_KEY,
+                // StandX
+                standxApiUrl: process.env.STANDX_API_URL,
+                standxChain: (process.env.STANDX_CHAIN as 'solana' | 'bnb') || 'solana'
+            };
+
+            exchange = createExchange(exchangeConfig);
+            console.log(`⚠️  LIVE MODE on ${exchangeType} - Real money at risk!`);
         } else {
             exchange = new MockExchange(modeConfig.initialBalance);
             console.log(`📝 PAPER MODE - Starting balance: $${modeConfig.initialBalance}`);
