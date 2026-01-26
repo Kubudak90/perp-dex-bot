@@ -260,11 +260,11 @@ export class Backtester {
     // ─────────────────────────────────────────────────────────────────────────
     // PRINT RESULTS (Phase 3: Using AnalyticsService)
     // ─────────────────────────────────────────────────────────────────────────
-    printResults(results: BacktestResult): void {
+    printResults(results: BacktestResult, initialEquity: number = 10000): void {
         // Use AnalyticsService for comprehensive metrics
         const analyticsStats = this.analytics.calculatePerformanceStats(
             results.trades,
-            results.totalPnl - results.totalPnl + 10000 // Approximation: final - total = initial
+            initialEquity
         );
 
         console.log('\n' + this.analytics.formatStats(analyticsStats));
@@ -354,10 +354,11 @@ async function main() {
     const candles = generateSampleData(90);
 
     console.log('Running backtest...');
+    const initialEquity = 10000;
     const backtester = new Backtester(config);
-    const results = backtester.run(candles, 10000);
+    const results = backtester.run(candles, initialEquity);
 
-    backtester.printResults(results);
+    backtester.printResults(results, initialEquity);
 
     // Show some sample trades
     console.log('\n📊 Sample Trades (last 10):');

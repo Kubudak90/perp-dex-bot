@@ -3,7 +3,7 @@
 // Coordinates strategy, risk, and exchange
 // ═══════════════════════════════════════════════════════════════════════════
 
-import { BotConfig, BotState, Signal, TradeResult } from './types';
+import { BotConfig, BotState, Signal, TradeResult, ExternalData } from './types';
 import type { Position } from './types';
 import { IndicatorCalculator } from './indicators';
 import { TradingStrategy } from './strategies';
@@ -33,6 +33,12 @@ export class PerpBot {
     private notificationService?: NotificationService;
     private databaseService?: DatabaseService;
     private analyticsService?: AnalyticsService;
+
+    // Daily reset tracking
+    private lastResetDay: number = -1;
+
+    // Partial TP tracking
+    private partialTpLevels?: { level1: number; level2: number; level3: number };
 
     constructor(config: BotConfig, exchange: IExchange, services?: BotServices) {
         this.config = config;
@@ -83,6 +89,9 @@ export class PerpBot {
             this.logger.info(`Existing position found: ${existingPosition.side} @ ${existingPosition.entryPrice}`);
         }
 
+        // Initialize daily reset tracking
+        this.lastResetDay = new Date().getUTCDate();
+
         this.logger.info('Bot initialized successfully');
         this.logConfig();
     }
@@ -92,10 +101,13 @@ export class PerpBot {
     // ─────────────────────────────────────────────────────────────────────────
     async start(): Promise<void> {
         this.isRunning = true;
-        this.logger.info('🚀 Bot started');
+        this.logger.info('Bot started');
 
         while (this.isRunning) {
             try {
+                // Check for daily reset
+                this.checkDailyReset();
+
                 await this.tick();
                 await this.sleep(this.getTickInterval());
             } catch (error) {
@@ -116,7 +128,26 @@ export class PerpBot {
 
     stop(): void {
         this.isRunning = false;
-        this.logger.info('🛑 Bot stopped');
+        this.logger.info('Bot stopped');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK DAILY RESET
+    // ─────────────────────────────────────────────────────────────────────────
+    private checkDailyReset(): void {
+        const currentDay = new Date().getUTCDate();
+
+        if (currentDay !== this.lastResetDay) {
+            this.logger.info('New day detected - resetting daily stats');
+            this.state = this.riskManager.resetDailyStats(this.state);
+            this.lastResetDay = currentDay;
+
+            // Send daily summary notification
+            if (this.notificationService && this.state.trades.length > 0) {
+                this.notificationService.notifyDailySummary(this.state)
+                    .catch((err: Error) => this.logger.error('Failed to send daily summary', err));
+            }
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -156,15 +187,28 @@ export class PerpBot {
                     this.state.position.stopLoss = newStopLoss;
                     this.state.peakPrice = newPeakPrice;
                     await this.exchange.setStopLoss(this.config.symbol, newStopLoss);
-                    this.logger.info(`📊 Trailing SL updated: ${newStopLoss.toFixed(2)}`);
+                    this.logger.info(`Trailing SL updated: ${newStopLoss.toFixed(2)}`);
                 }
             }
 
             // Phase 2: Check if position should be force-closed (max hold time)
             if (this.riskManager.shouldForceClose(this.state.position)) {
-                this.logger.warn('⏰ Max hold time reached - Force closing position');
+                this.logger.warn('Max hold time reached - Force closing position');
                 await this.executeClose(currentPrice, 'SIGNAL');
                 return;
+            }
+
+            // Phase 6B: Check Partial Take Profit levels
+            if (this.config.usePartialTp && this.partialTpLevels) {
+                const partialCheck = this.strategy.checkPartialTP(
+                    this.state.position,
+                    currentPrice,
+                    this.partialTpLevels
+                );
+
+                if (partialCheck?.hit) {
+                    await this.executePartialClose(currentPrice, partialCheck.level);
+                }
             }
 
             // Check SL/TP
@@ -175,11 +219,12 @@ export class PerpBot {
             }
         }
 
-        // 4. Generate signal
-        const signal = this.strategy.generateSignal(indicators, this.state.position, currentPrice);
+        // 4. Generate signal (with optional external data)
+        const externalData: ExternalData | undefined = undefined;
+        const signal = this.strategy.generateSignal(indicators, this.state.position, currentPrice, externalData);
 
         // 5. Execute signal
-        await this.executeSignal(signal, currentPrice, indicators.atr);
+        await this.executeSignal(signal, currentPrice, indicators.atr, indicators.atrPercentile);
 
         // Debug output (every tick)
         this.logger.debug(this.strategy.getStateDebug(indicators));
@@ -191,7 +236,8 @@ export class PerpBot {
     private async executeSignal(
         signal: Signal,
         currentPrice: number,
-        atr: number
+        atr: number,
+        atrPercentile?: number
     ): Promise<void> {
         if (signal === 'NONE') return;
 
@@ -208,7 +254,7 @@ export class PerpBot {
                 return;
             }
 
-            await this.executeOpen(signal, currentPrice, atr);
+            await this.executeOpen(signal, currentPrice, atr, atrPercentile);
         }
     }
 
@@ -218,18 +264,38 @@ export class PerpBot {
     private async executeOpen(
         side: 'LONG' | 'SHORT',
         currentPrice: number,
-        atr: number
+        atr: number,
+        atrPercentile?: number
     ): Promise<void> {
-        // Calculate SL/TP
-        const { stopLoss, takeProfit } = this.strategy.calculateSLTP(side, currentPrice, atr);
+        // Calculate SL/TP (with dynamic SL if enabled)
+        const sltpResult = this.strategy.calculateSLTP(side, currentPrice, atr, atrPercentile);
+        const { stopLoss, takeProfit } = sltpResult;
+
+        // Store partial TP levels if enabled
+        if (this.config.usePartialTp && sltpResult.partialTpLevels) {
+            this.partialTpLevels = sltpResult.partialTpLevels;
+        }
 
         // Calculate position size
-        const positionSize = this.riskManager.calculatePositionSize(
+        let positionSize = this.riskManager.calculatePositionSize(
             this.state.equity,
             currentPrice,
             stopLoss,
             this.config.leverage
         );
+
+        // Apply market regime multiplier if enabled
+        if (this.config.useMarketRegime) {
+            const candles = await this.exchange.getCandles(this.config.symbol, this.config.timeframe, 250);
+            const fundingRate = await this.exchange.getFundingRate(this.config.symbol);
+            const indicators = IndicatorCalculator.getIndicators(candles, this.config, fundingRate);
+            const multiplier = this.strategy.calculatePositionSizeMultiplier(indicators.marketRegime);
+            positionSize *= multiplier;
+
+            if (multiplier < 1) {
+                this.logger.info(`Position size reduced by ${((1 - multiplier) * 100).toFixed(0)}% due to market regime`);
+            }
+        }
 
         // Execute order
         const result = await this.exchange.openPosition(
@@ -247,7 +313,10 @@ export class PerpBot {
             stopLoss,
             takeProfit,
             entryTime: Date.now(),
-            unrealizedPnl: 0
+            unrealizedPnl: 0,
+            initialSize: positionSize,
+            remainingSize: positionSize,
+            partialTpLevels: []
         };
 
         // Phase 2: Initialize peak price for trailing stop
@@ -279,6 +348,62 @@ export class PerpBot {
                 stopLoss,
                 takeProfit
             ).catch(err => this.logger.error('Failed to send trade notification', err as Error));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PARTIAL CLOSE (Phase 6B)
+    // ─────────────────────────────────────────────────────────────────────────
+    private async executePartialClose(currentPrice: number, level: number): Promise<void> {
+        if (!this.state.position || !this.config.partialTpLevels) return;
+
+        // Get close percentage for this level
+        const levelConfig = level === 1
+            ? this.config.partialTpLevels.level1
+            : level === 2
+                ? this.config.partialTpLevels.level2
+                : this.config.partialTpLevels.level3;
+
+        if (!levelConfig) return;
+
+        const closePercent = levelConfig.closePercent / 100;
+        const closeSize = this.state.position.size * closePercent;
+
+        this.logger.info(`Partial TP Level ${level} hit - Closing ${(closePercent * 100).toFixed(0)}% of position`);
+
+        // Calculate PnL for partial close
+        const { pnl, pnlPercent } = this.riskManager.calculatePnl(
+            { ...this.state.position, size: closeSize },
+            currentPrice,
+            this.config.leverage
+        );
+
+        // Update state
+        this.state.dailyPnl += pnl;
+        this.state.equity += pnl;
+        this.state.position.size -= closeSize;
+        this.state.position.remainingSize = this.state.position.size;
+        this.state.position.partialTpLevels = [
+            ...(this.state.position.partialTpLevels || []),
+            level
+        ];
+
+        this.logger.info(`Partial close: +$${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%) | Remaining: ${this.state.position.size.toFixed(6)}`);
+
+        // Move stop loss to breakeven after first partial TP
+        if (level === 1 && this.state.position.size > 0) {
+            const breakeven = this.state.position.entryPrice;
+            this.state.position.stopLoss = breakeven;
+            await this.exchange.setStopLoss(this.config.symbol, breakeven);
+            this.logger.info(`SL moved to breakeven: ${breakeven.toFixed(2)}`);
+        }
+
+        // Send notification
+        if (this.notificationService) {
+            await this.notificationService.notifyRiskAlert(
+                `Partial TP Level ${level}: +$${pnl.toFixed(2)} (${pnlPercent.toFixed(2)}%)`,
+                'info'
+            ).catch(err => this.logger.error('Failed to send partial TP notification', err as Error));
         }
     }
 
@@ -346,7 +471,7 @@ export class PerpBot {
             if (this.state.consecutiveLosses && this.state.consecutiveLosses >= (this.config.risk.maxConsecutiveLosses || 3)) {
                 if (this.notificationService) {
                     await this.notificationService.notifyRiskAlert(
-                        `⚠️ Consecutive losses: ${this.state.consecutiveLosses}. Bot may pause trading.`,
+                        `Consecutive losses: ${this.state.consecutiveLosses}. Bot may pause trading.`,
                         'error'
                     ).catch(err => this.logger.error('Failed to send risk alert', err as Error));
                 }
@@ -356,9 +481,10 @@ export class PerpBot {
             this.state = this.riskManager.updateStateAfterTrade(this.state, tradeResult);
         }
 
-        // Reset peak price after closing position
+        // Reset peak price and partial TP tracking after closing position
         this.state.peakPrice = undefined;
         this.state.portfolioHeat = 0;
+        this.partialTpLevels = undefined;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -417,6 +543,7 @@ export class PerpBot {
     │ EMA:          ${this.config.emaFastPeriod} / ${this.config.emaSlowPeriod}
     │ ADX:          ${this.config.adxPeriod} (threshold: ${this.config.adxThreshold})
     │ Risk/Reward:  1:${this.config.risk.riskRewardRatio}
+    │ Risk/Trade:   ${this.config.risk.riskPerTrade ?? 1}%
     │ Max Daily:    ${this.config.risk.maxDailyTrades} trades
     │ Max Loss:     ${this.config.risk.maxDailyLoss}%
     └─────────────────────────────────────────┘`);
