@@ -16,6 +16,9 @@ import {
     filterTradesBySide
 } from '../utils/export';
 import { Backtester, generateSampleData } from '../backtest';
+import { portfolioTracker, PortfolioTracker } from '../utils/portfolio';
+import { strategyBuilder, StrategyBuilder, STRATEGY_TEMPLATES } from '../utils/strategyBuilder';
+import { priceFeed, PriceFeed } from '../utils/priceFeed';
 
 export interface DashboardConfig {
     port: number;
@@ -176,6 +179,31 @@ export class Dashboard {
                 // Backtest endpoint
                 } else if (url === '/api/backtest' && req.method === 'POST') {
                     await this.handleBacktest(req, res);
+                // Portfolio endpoints
+                } else if (url === '/api/portfolio/summary' && req.method === 'GET') {
+                    this.handlePortfolioSummary(res);
+                } else if (url === '/api/portfolio/history' && req.method === 'GET') {
+                    this.handlePortfolioHistory(req, res);
+                } else if (url === '/api/portfolio/rebalance' && req.method === 'GET') {
+                    this.handleRebalanceRecommendations(res);
+                // Strategy Builder endpoints
+                } else if (url === '/api/strategies' && req.method === 'GET') {
+                    this.handleGetStrategies(res);
+                } else if (url === '/api/strategies/templates' && req.method === 'GET') {
+                    this.handleGetTemplates(res);
+                } else if (url === '/api/strategies' && req.method === 'POST') {
+                    await this.handleCreateStrategy(req, res);
+                } else if (url.startsWith('/api/strategies/') && req.method === 'PUT') {
+                    await this.handleUpdateStrategy(req, res, url);
+                } else if (url.startsWith('/api/strategies/') && url.endsWith('/activate') && req.method === 'POST') {
+                    this.handleActivateStrategy(req, res, url);
+                // Price Feed endpoints
+                } else if (url === '/api/prices/live' && req.method === 'GET') {
+                    this.handleLivePrices(res);
+                } else if (url === '/api/prices/subscribe' && req.method === 'POST') {
+                    await this.handlePriceSubscribe(req, res);
+                } else if (url === '/api/prices/history' && req.method === 'GET') {
+                    this.handlePriceHistory(req, res);
                 } else if (url === '/health') {
                     res.writeHead(200);
                     res.end('OK');
@@ -855,6 +883,212 @@ export class Dashboard {
             }, null, 2));
         } catch (error) {
             this.logger.error('Backtest error', error as Error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PORTFOLIO HANDLERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private handlePortfolioSummary(res: http.ServerResponse): void {
+        try {
+            const summary = portfolioTracker.getSummary();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(summary, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handlePortfolioHistory(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+            const hours = parseInt(urlObj.searchParams.get('hours') || '24');
+            const history = portfolioTracker.getHistory(hours);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(history, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleRebalanceRecommendations(res: http.ServerResponse): void {
+        try {
+            const recommendations = portfolioTracker.getRebalanceRecommendations();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(recommendations, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // STRATEGY BUILDER HANDLERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private handleGetStrategies(res: http.ServerResponse): void {
+        try {
+            const strategies = strategyBuilder.getAllStrategies();
+            const active = strategyBuilder.getActiveStrategy();
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                strategies,
+                activeStrategyId: active?.id || null
+            }, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleGetTemplates(res: http.ServerResponse): void {
+        try {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(STRATEGY_TEMPLATES, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handleCreateStrategy(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const { name, description, templateId } = body;
+
+            let strategy;
+            if (templateId) {
+                strategy = strategyBuilder.createFromTemplate(templateId);
+            } else {
+                strategy = strategyBuilder.createStrategy(name || 'New Strategy', description || '');
+            }
+
+            if (!strategy) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Failed to create strategy' }));
+                return;
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, strategy }, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handleUpdateStrategy(req: http.IncomingMessage, res: http.ServerResponse, url: string): Promise<void> {
+        try {
+            const strategyId = url.split('/')[3];
+            const body = await this.parseBody(req);
+
+            const updated = strategyBuilder.updateStrategy(strategyId, body);
+
+            if (!updated) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Strategy not found' }));
+                return;
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, strategy: updated }, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleActivateStrategy(req: http.IncomingMessage, res: http.ServerResponse, url: string): void {
+        try {
+            const parts = url.split('/');
+            const strategyId = parts[3];
+
+            const activated = strategyBuilder.setActiveStrategy(strategyId);
+
+            if (!activated) {
+                res.writeHead(404, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Strategy not found' }));
+                return;
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, message: 'Strategy activated' }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // PRICE FEED HANDLERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private handleLivePrices(res: http.ServerResponse): void {
+        try {
+            // Start price feed if not running
+            if (!priceFeed.isConnected()) {
+                priceFeed.start();
+            }
+
+            const prices = priceFeed.getAllPrices();
+            const stats = priceFeed.getStats();
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                prices,
+                stats,
+                timestamp: Date.now()
+            }, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private async handlePriceSubscribe(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const { symbol } = body;
+
+            if (!symbol) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Symbol required' }));
+                return;
+            }
+
+            priceFeed.addSymbol(symbol.toUpperCase());
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                message: `Subscribed to ${symbol}`,
+                symbols: priceFeed.getSymbols()
+            }));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handlePriceHistory(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+            const symbol = urlObj.searchParams.get('symbol') || 'BTC';
+            const limit = parseInt(urlObj.searchParams.get('limit') || '100');
+
+            const history = priceFeed.getPriceHistory(symbol.toUpperCase(), limit);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                symbol,
+                history,
+                currentPrice: priceFeed.getPrice(symbol.toUpperCase())
+            }, null, 2));
+        } catch (error) {
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, message: (error as Error).message }));
         }
@@ -1554,6 +1788,109 @@ export class Dashboard {
             padding: 20px;
             color: #71717a;
         }
+
+        /* Live Prices */
+        .price-ticker {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 800px) { .price-ticker { grid-template-columns: repeat(2, 1fr); } }
+        .price-item {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 12px 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .price-symbol {
+            font-weight: 700;
+            font-size: 0.9rem;
+            color: #a855f7;
+            min-width: 40px;
+        }
+        .price-value {
+            font-size: 1rem;
+            font-weight: 600;
+            flex: 1;
+        }
+        .price-change {
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        /* Portfolio */
+        .portfolio-summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 800px) { .portfolio-summary { grid-template-columns: repeat(2, 1fr); } }
+        .portfolio-stat {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 16px;
+            text-align: center;
+        }
+        .portfolio-label {
+            display: block;
+            font-size: 0.7rem;
+            color: #71717a;
+            text-transform: uppercase;
+            margin-bottom: 6px;
+        }
+        .portfolio-value {
+            font-size: 1.2rem;
+            font-weight: 700;
+        }
+
+        /* Strategy Builder */
+        .template-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 800px) { .template-grid { grid-template-columns: 1fr; } }
+        .template-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 8px;
+            padding: 16px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .template-card:hover {
+            background: rgba(168,85,247,0.1);
+            border-color: rgba(168,85,247,0.3);
+        }
+        .template-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .template-desc {
+            font-size: 0.8rem;
+            color: #71717a;
+            margin-bottom: 8px;
+        }
+        .badge-trend { background: rgba(34,197,94,0.2); color: #22c55e; }
+        .badge-reversion { background: rgba(59,130,246,0.2); color: #3b82f6; }
+        .badge-breakout { background: rgba(249,115,22,0.2); color: #f97316; }
+        .active-strategy-card {
+            background: rgba(168,85,247,0.1);
+            border: 1px solid rgba(168,85,247,0.3);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .strategy-name {
+            font-weight: 600;
+            font-size: 1.1rem;
+            margin-bottom: 8px;
+        }
+        .strategy-stats {
+            font-size: 0.85rem;
+            color: #a1a1aa;
+        }
     </style>
 </head>
 <body>
@@ -1999,6 +2336,102 @@ export class Dashboard {
                                 <tr><td colspan="5" class="no-data">No backtest run yet</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Live Prices Panel -->
+            <div class="card" style="margin-bottom:24px;">
+                <div class="analytics-header">
+                    <div class="card-title">Live Market Prices</div>
+                    <button class="btn btn-sm btn-outline" onclick="refreshPrices()">Refresh</button>
+                </div>
+                <div class="price-ticker" id="priceTicker">
+                    <div class="price-item">
+                        <span class="price-symbol">BTC</span>
+                        <span class="price-value" id="priceBTC">$0.00</span>
+                        <span class="price-change positive" id="changeBTC">+0.00%</span>
+                    </div>
+                    <div class="price-item">
+                        <span class="price-symbol">ETH</span>
+                        <span class="price-value" id="priceETH">$0.00</span>
+                        <span class="price-change positive" id="changeETH">+0.00%</span>
+                    </div>
+                    <div class="price-item">
+                        <span class="price-symbol">SOL</span>
+                        <span class="price-value" id="priceSOL">$0.00</span>
+                        <span class="price-change positive" id="changeSOL">+0.00%</span>
+                    </div>
+                    <div class="price-item">
+                        <span class="price-symbol">BNB</span>
+                        <span class="price-value" id="priceBNB">$0.00</span>
+                        <span class="price-change positive" id="changeBNB">+0.00%</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Portfolio Panel -->
+            <div class="card" style="margin-bottom:24px;">
+                <div class="analytics-header">
+                    <div class="card-title">Portfolio Overview</div>
+                    <button class="btn btn-sm btn-outline" onclick="refreshPortfolio()">Refresh</button>
+                </div>
+                <div class="portfolio-summary">
+                    <div class="portfolio-stat">
+                        <span class="portfolio-label">Total Value</span>
+                        <span class="portfolio-value" id="portfolioValue">$10,000.00</span>
+                    </div>
+                    <div class="portfolio-stat">
+                        <span class="portfolio-label">Total PnL</span>
+                        <span class="portfolio-value" id="portfolioPnl">$0.00</span>
+                    </div>
+                    <div class="portfolio-stat">
+                        <span class="portfolio-label">Risk Score</span>
+                        <span class="portfolio-value" id="portfolioRisk">0/100</span>
+                    </div>
+                    <div class="portfolio-stat">
+                        <span class="portfolio-label">Margin Level</span>
+                        <span class="portfolio-value" id="portfolioMargin">100%</span>
+                    </div>
+                </div>
+                <div id="portfolioPositions" style="margin-top:12px;">
+                    <div class="no-data" style="padding:12px;">No open positions</div>
+                </div>
+            </div>
+
+            <!-- Strategy Builder Panel -->
+            <div class="card" style="margin-bottom:24px;">
+                <div class="analytics-header">
+                    <div class="card-title">Strategy Builder</div>
+                    <button class="btn btn-sm btn-primary" onclick="showStrategyModal()">New Strategy</button>
+                </div>
+                <div class="strategy-templates">
+                    <div class="section-title">Quick Start Templates</div>
+                    <div class="template-grid" id="strategyTemplates">
+                        <div class="template-card" onclick="createFromTemplate('supertrend-ema')">
+                            <div class="template-name">Supertrend + EMA</div>
+                            <div class="template-desc">Trend-following</div>
+                            <span class="badge badge-trend">TREND</span>
+                        </div>
+                        <div class="template-card" onclick="createFromTemplate('rsi-mean-reversion')">
+                            <div class="template-name">RSI Mean Reversion</div>
+                            <div class="template-desc">Buy oversold, sell overbought</div>
+                            <span class="badge badge-reversion">MEAN REVERSION</span>
+                        </div>
+                        <div class="template-card" onclick="createFromTemplate('bollinger-breakout')">
+                            <div class="template-name">Bollinger Breakout</div>
+                            <div class="template-desc">Volume-confirmed breakouts</div>
+                            <span class="badge badge-breakout">BREAKOUT</span>
+                        </div>
+                    </div>
+                </div>
+                <div id="activeStrategy" style="margin-top:16px; display:none;">
+                    <div class="section-title">Active Strategy</div>
+                    <div class="active-strategy-card">
+                        <div class="strategy-name" id="activeStrategyName">-</div>
+                        <div class="strategy-stats">
+                            <span id="activeStrategyStats">-</span>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -2681,6 +3114,144 @@ export class Dashboard {
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') hideAnalyticsModal();
         });
+
+        // ═══════════════════════════════════════════════════════════════════
+        // LIVE PRICES
+        // ═══════════════════════════════════════════════════════════════════
+        let priceInterval = null;
+
+        function startPriceFeed() {
+            refreshPrices();
+            if (!priceInterval) {
+                priceInterval = setInterval(refreshPrices, 2000);
+            }
+        }
+
+        async function refreshPrices() {
+            try {
+                const res = await fetch('/api/prices/live');
+                const data = await res.json();
+                updatePriceDisplay(data.prices);
+            } catch (e) {
+                console.error('Failed to fetch prices:', e);
+            }
+        }
+
+        function updatePriceDisplay(prices) {
+            if (!prices) return;
+            for (const p of prices) {
+                const priceEl = document.getElementById('price' + p.symbol);
+                const changeEl = document.getElementById('change' + p.symbol);
+                if (priceEl) {
+                    priceEl.textContent = '$' + p.price.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+                }
+                if (changeEl) {
+                    const prefix = p.changePercent24h >= 0 ? '+' : '';
+                    changeEl.textContent = prefix + p.changePercent24h.toFixed(2) + '%';
+                    changeEl.className = 'price-change ' + (p.changePercent24h >= 0 ? 'positive' : 'negative');
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // PORTFOLIO
+        // ═══════════════════════════════════════════════════════════════════
+        async function refreshPortfolio() {
+            try {
+                const res = await fetch('/api/portfolio/summary');
+                const summary = await res.json();
+                updatePortfolioDisplay(summary);
+            } catch (e) {
+                console.error('Failed to fetch portfolio:', e);
+            }
+        }
+
+        function updatePortfolioDisplay(summary) {
+            if (!summary) return;
+
+            const valueEl = document.getElementById('portfolioValue');
+            valueEl.textContent = '$' + summary.totalValue.toLocaleString(undefined, {minimumFractionDigits: 2});
+
+            const pnlEl = document.getElementById('portfolioPnl');
+            const pnlPrefix = summary.totalPnl >= 0 ? '+' : '';
+            pnlEl.textContent = pnlPrefix + '$' + summary.totalPnl.toFixed(2);
+            pnlEl.className = 'portfolio-value ' + (summary.totalPnl >= 0 ? 'positive' : 'negative');
+
+            document.getElementById('portfolioRisk').textContent = summary.riskScore + '/100';
+            document.getElementById('portfolioMargin').textContent = summary.marginLevel.toFixed(0) + '%';
+
+            // Positions
+            const positionsEl = document.getElementById('portfolioPositions');
+            if (summary.positions && summary.positions.length > 0) {
+                positionsEl.innerHTML = summary.positions.map(p => \`
+                    <div class="position-row" style="display:flex;justify-content:space-between;padding:8px;background:rgba(255,255,255,0.03);border-radius:6px;margin-bottom:6px;">
+                        <span><strong>\${p.symbol}</strong> <span class="badge badge-\${p.side.toLowerCase()}">\${p.side}</span></span>
+                        <span>\${p.leverage}x @ $\${p.entryPrice.toFixed(2)}</span>
+                        <span class="\${p.unrealizedPnl >= 0 ? 'positive' : 'negative'}">\${p.unrealizedPnl >= 0 ? '+' : ''}$\${p.unrealizedPnl.toFixed(2)}</span>
+                    </div>
+                \`).join('');
+            } else {
+                positionsEl.innerHTML = '<div class="no-data" style="padding:12px;">No open positions</div>';
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════
+        // STRATEGY BUILDER
+        // ═══════════════════════════════════════════════════════════════════
+        async function createFromTemplate(templateId) {
+            try {
+                const res = await fetch('/api/strategies', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ templateId })
+                });
+                const data = await res.json();
+
+                if (data.success && data.strategy) {
+                    // Activate the new strategy
+                    await fetch('/api/strategies/' + data.strategy.id + '/activate', { method: 'POST' });
+                    showActiveStrategy(data.strategy);
+                    alert('Strategy created and activated: ' + data.strategy.name);
+                }
+            } catch (e) {
+                console.error('Failed to create strategy:', e);
+            }
+        }
+
+        function showActiveStrategy(strategy) {
+            const container = document.getElementById('activeStrategy');
+            container.style.display = 'block';
+            document.getElementById('activeStrategyName').textContent = strategy.name;
+            document.getElementById('activeStrategyStats').textContent =
+                'v' + strategy.version + ' | ' +
+                (strategy.backtestResults
+                    ? 'Win Rate: ' + strategy.backtestResults.winRate.toFixed(1) + '% | PF: ' + strategy.backtestResults.profitFactor.toFixed(2)
+                    : 'Not backtested');
+        }
+
+        function showStrategyModal() {
+            alert('Strategy Builder modal coming soon! Use the templates above for quick start.');
+        }
+
+        async function loadActiveStrategy() {
+            try {
+                const res = await fetch('/api/strategies');
+                const data = await res.json();
+                if (data.activeStrategyId) {
+                    const active = data.strategies.find(s => s.id === data.activeStrategyId);
+                    if (active) showActiveStrategy(active);
+                }
+            } catch (e) {
+                console.error('Failed to load strategies:', e);
+            }
+        }
+
+        // Initialize new panels when dashboard loads
+        setTimeout(() => {
+            startPriceFeed();
+            refreshPortfolio();
+            loadActiveStrategy();
+        }, 1000);
 
         // Backtest functions
         async function runBacktest() {
