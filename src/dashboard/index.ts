@@ -8,6 +8,14 @@ import { BotState, TradeResult, ExchangeType } from '../types';
 import { Logger } from '../utils/logger';
 import { authService, rateLimiters, extractToken, getClientIP } from '../utils/auth';
 import { googleOAuth } from '../utils/auth/google';
+import {
+    tradesToCSV,
+    tradesToJSON,
+    generatePerformanceReport,
+    filterTradesByDateRange,
+    filterTradesBySide
+} from '../utils/export';
+import { Backtester, generateSampleData } from '../backtest';
 
 export interface DashboardConfig {
     port: number;
@@ -154,6 +162,20 @@ export class Dashboard {
                     await this.handleGoogleCallback(req, res);
                 } else if (url === '/api/auth/google/link' && req.method === 'POST') {
                     await this.handleGoogleLink(req, res);
+                // Export & Analytics endpoints
+                } else if (url === '/api/export/csv' && req.method === 'GET') {
+                    this.handleExportCSV(req, res);
+                } else if (url === '/api/export/json' && req.method === 'GET') {
+                    this.handleExportJSON(req, res);
+                } else if (url === '/api/analytics/report' && req.method === 'GET') {
+                    this.handleAnalyticsReport(req, res);
+                } else if (url === '/api/analytics/daily' && req.method === 'GET') {
+                    this.handleDailyAnalytics(res);
+                } else if (url === '/api/analytics/equity' && req.method === 'GET') {
+                    this.handleEquityCurve(res);
+                // Backtest endpoint
+                } else if (url === '/api/backtest' && req.method === 'POST') {
+                    await this.handleBacktest(req, res);
                 } else if (url === '/health') {
                     res.writeHead(200);
                     res.end('OK');
@@ -530,6 +552,309 @@ export class Dashboard {
                 message: 'Google account linked successfully'
             }));
         } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EXPORT & ANALYTICS HANDLERS
+    // ─────────────────────────────────────────────────────────────────────────
+    private handleExportCSV(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            const state = this.getState();
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+
+            // Parse query params for filtering
+            let trades = state.trades;
+            const startDate = urlObj.searchParams.get('startDate');
+            const endDate = urlObj.searchParams.get('endDate');
+            const side = urlObj.searchParams.get('side') as 'LONG' | 'SHORT' | null;
+
+            if (startDate || endDate) {
+                trades = filterTradesByDateRange(
+                    trades,
+                    startDate ? new Date(startDate) : undefined,
+                    endDate ? new Date(endDate) : undefined
+                );
+            }
+
+            if (side) {
+                trades = filterTradesBySide(trades, side);
+            }
+
+            const csv = tradesToCSV(trades);
+            const filename = `trades_${new Date().toISOString().split('T')[0]}.csv`;
+
+            res.writeHead(200, {
+                'Content-Type': 'text/csv',
+                'Content-Disposition': `attachment; filename="${filename}"`
+            });
+            res.end(csv);
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleExportJSON(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            const state = this.getState();
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+
+            // Parse query params for filtering
+            let trades = state.trades;
+            const startDate = urlObj.searchParams.get('startDate');
+            const endDate = urlObj.searchParams.get('endDate');
+            const side = urlObj.searchParams.get('side') as 'LONG' | 'SHORT' | null;
+
+            if (startDate || endDate) {
+                trades = filterTradesByDateRange(
+                    trades,
+                    startDate ? new Date(startDate) : undefined,
+                    endDate ? new Date(endDate) : undefined
+                );
+            }
+
+            if (side) {
+                trades = filterTradesBySide(trades, side);
+            }
+
+            const data = tradesToJSON(trades);
+            const filename = `trades_${new Date().toISOString().split('T')[0]}.json`;
+
+            res.writeHead(200, {
+                'Content-Type': 'application/json',
+                'Content-Disposition': `attachment; filename="${filename}"`
+            });
+            res.end(JSON.stringify(data, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleAnalyticsReport(req: http.IncomingMessage, res: http.ServerResponse): void {
+        try {
+            const state = this.getState();
+            const config = this.getConfig();
+            const urlObj = new URL(req.url || '', `http://${req.headers.host}`);
+
+            // Parse query params
+            let trades = state.trades;
+            const startDate = urlObj.searchParams.get('startDate');
+            const endDate = urlObj.searchParams.get('endDate');
+            const period = urlObj.searchParams.get('period') || 'All Time';
+
+            if (startDate || endDate) {
+                trades = filterTradesByDateRange(
+                    trades,
+                    startDate ? new Date(startDate) : undefined,
+                    endDate ? new Date(endDate) : undefined
+                );
+            }
+
+            const initialEquity = this.currentCredentials?.paperBalance || config.paperBalance || 10000;
+            const report = generatePerformanceReport(trades, initialEquity, period);
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(report, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleDailyAnalytics(res: http.ServerResponse): void {
+        try {
+            const state = this.getState();
+            const trades = state.trades;
+
+            // Group trades by day
+            const dailyMap = new Map<string, {
+                date: string;
+                trades: number;
+                wins: number;
+                losses: number;
+                pnl: number;
+                volume: number;
+            }>();
+
+            for (const trade of trades) {
+                const tradeTime = trade.exitTime || Date.now();
+                const date = new Date(tradeTime).toISOString().split('T')[0];
+                const existing = dailyMap.get(date) || {
+                    date,
+                    trades: 0,
+                    wins: 0,
+                    losses: 0,
+                    pnl: 0,
+                    volume: 0
+                };
+
+                existing.trades++;
+                existing.pnl += trade.pnl;
+                existing.volume += (trade.size || 0) * trade.entryPrice;
+                if (trade.pnl > 0) existing.wins++;
+                else existing.losses++;
+
+                dailyMap.set(date, existing);
+            }
+
+            const dailyStats = Array.from(dailyMap.values())
+                .sort((a, b) => a.date.localeCompare(b.date))
+                .map(day => ({
+                    ...day,
+                    winRate: day.trades > 0 ? (day.wins / day.trades) * 100 : 0
+                }));
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(dailyStats, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    private handleEquityCurve(res: http.ServerResponse): void {
+        try {
+            const state = this.getState();
+            const config = this.getConfig();
+            const initialEquity = this.currentCredentials?.paperBalance || config.paperBalance || 10000;
+
+            const sortedTrades = [...state.trades].sort((a, b) => (a.entryTime || 0) - (b.entryTime || 0));
+
+            let equity = initialEquity;
+            let peak = initialEquity;
+
+            const curve = [{ time: Date.now() - 86400000, equity: initialEquity, drawdown: 0 }];
+
+            for (const trade of sortedTrades) {
+                equity += trade.pnl;
+                if (equity > peak) peak = equity;
+                const drawdown = peak > 0 ? ((peak - equity) / peak) * 100 : 0;
+
+                curve.push({
+                    time: trade.exitTime || Date.now(),
+                    equity,
+                    drawdown
+                });
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                initialEquity,
+                currentEquity: equity,
+                peakEquity: peak,
+                maxDrawdown: Math.max(...curve.map(c => c.drawdown)),
+                curve
+            }, null, 2));
+        } catch (error) {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, message: (error as Error).message }));
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // BACKTEST HANDLER
+    // ─────────────────────────────────────────────────────────────────────────
+    private async handleBacktest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+        try {
+            const body = await this.parseBody(req);
+            const {
+                days = 30,
+                initialEquity = 10000,
+                leverage = 3,
+                supertrendPeriod = 10,
+                supertrendMultiplier = 3,
+                emaFastPeriod = 50,
+                emaSlowPeriod = 200,
+                adxThreshold = 20,
+                maxPositionSize = 20,
+                maxDailyLoss = 3,
+                maxDailyTrades = 3,
+                riskRewardRatio = 1.5,
+                stopLossAtrMultiplier = 1.5
+            } = body;
+
+            // Validate inputs
+            if (days < 7 || days > 365) {
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: 'Days must be between 7 and 365' }));
+                return;
+            }
+
+            this.logger.info(`Starting backtest: ${days} days, $${initialEquity} initial equity`);
+
+            // Create backtest config
+            const backtestConfig = {
+                symbol: 'BTC',
+                timeframe: '15m',
+                leverage,
+                supertrendPeriod,
+                supertrendMultiplier,
+                emaFastPeriod,
+                emaSlowPeriod,
+                adxPeriod: 14,
+                adxThreshold,
+                fundingThreshold: 0.0005,
+                useFundingFilter: true,
+                atrPeriod: 14,
+                atrLookback: 100,
+                minAtrPercentile: 20,
+                maxAtrPercentile: 90,
+                risk: {
+                    maxPositionSize,
+                    maxDailyLoss,
+                    maxDailyTrades,
+                    riskRewardRatio,
+                    stopLossAtrMultiplier,
+                    cooldownMinutes: 30
+                }
+            };
+
+            // Generate sample data and run backtest
+            const candles = generateSampleData(days);
+            const backtester = new Backtester(backtestConfig);
+            const results = backtester.run(candles, initialEquity);
+
+            this.logger.success(`Backtest completed: ${results.totalTrades} trades, ${results.winRate.toFixed(1)}% win rate`);
+
+            // Return results
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+                success: true,
+                config: {
+                    days,
+                    initialEquity,
+                    leverage,
+                    supertrendPeriod,
+                    supertrendMultiplier,
+                    adxThreshold,
+                    riskRewardRatio
+                },
+                results: {
+                    totalTrades: results.totalTrades,
+                    winningTrades: results.winningTrades,
+                    losingTrades: results.losingTrades,
+                    winRate: results.winRate,
+                    totalPnl: results.totalPnl,
+                    totalPnlPercent: results.totalPnlPercent,
+                    maxDrawdown: results.maxDrawdown,
+                    maxDrawdownPercent: results.maxDrawdownPercent,
+                    sharpeRatio: results.sharpeRatio,
+                    profitFactor: results.profitFactor,
+                    averageWin: results.averageWin,
+                    averageLoss: results.averageLoss,
+                    largestWin: results.largestWin,
+                    largestLoss: results.largestLoss,
+                    averageTradeDuration: results.averageTradeDuration,
+                    finalEquity: initialEquity + results.totalPnl
+                },
+                trades: results.trades.slice(-20) // Last 20 trades for display
+            }, null, 2));
+        } catch (error) {
+            this.logger.error('Backtest error', error as Error);
             res.writeHead(500, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, message: (error as Error).message }));
         }
@@ -1072,6 +1397,163 @@ export class Dashboard {
         /* Connecting state */
         .connecting { animation: connecting 1.5s infinite; }
         @keyframes connecting { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+        /* Analytics Panel */
+        .analytics-panel .analytics-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        .export-buttons { display: flex; gap: 8px; }
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 20px;
+        }
+        @media (max-width: 900px) { .analytics-grid { grid-template-columns: 1fr; } }
+        .analytics-section {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 16px;
+        }
+        .section-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: #a855f7;
+            font-weight: 600;
+            margin-bottom: 12px;
+            letter-spacing: 0.5px;
+        }
+        .metric-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+        }
+        .metric-row:last-child { border-bottom: none; }
+        .metric-label { color: #71717a; font-size: 0.85rem; }
+        .metric-value { font-weight: 600; font-size: 0.9rem; }
+
+        /* Modal */
+        .modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: opacity 0.3s, visibility 0.3s;
+        }
+        .modal.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        .modal-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.8);
+        }
+        .modal-content {
+            position: relative;
+            background: #18181b;
+            border-radius: 16px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 85vh;
+            overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 20px 24px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .modal-header h2 { font-size: 1.25rem; font-weight: 600; }
+        .modal-close {
+            background: transparent;
+            border: none;
+            color: #71717a;
+            font-size: 1.5rem;
+            cursor: pointer;
+            padding: 4px 8px;
+            line-height: 1;
+        }
+        .modal-close:hover { color: #e4e4e7; }
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            max-height: calc(85vh - 80px);
+        }
+        .report-section {
+            margin-bottom: 24px;
+        }
+        .report-section-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: #a855f7;
+            margin-bottom: 12px;
+            padding-bottom: 8px;
+            border-bottom: 1px solid rgba(168,85,247,0.3);
+        }
+        .report-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 600px) { .report-grid { grid-template-columns: 1fr; } }
+        .report-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 12px;
+            background: rgba(255,255,255,0.03);
+            border-radius: 6px;
+        }
+        .report-item-label { color: #a1a1aa; font-size: 0.85rem; }
+        .report-item-value { font-weight: 600; }
+
+        /* Backtest Panel */
+        .backtest-panel .form-row {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        @media (max-width: 900px) { .backtest-panel .form-row { grid-template-columns: repeat(2, 1fr); } }
+        @media (max-width: 500px) { .backtest-panel .form-row { grid-template-columns: 1fr; } }
+        .backtest-panel .form-group { margin-bottom: 0; }
+        .backtest-panel .form-input {
+            padding: 8px 12px;
+            font-size: 0.9rem;
+        }
+        .backtest-summary {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 12px;
+        }
+        @media (max-width: 900px) { .backtest-summary { grid-template-columns: repeat(2, 1fr); } }
+        .bt-stat {
+            background: rgba(255,255,255,0.03);
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+        }
+        .bt-label {
+            display: block;
+            font-size: 0.7rem;
+            color: #71717a;
+            text-transform: uppercase;
+            margin-bottom: 4px;
+        }
+        .bt-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        .bt-loading {
+            text-align: center;
+            padding: 20px;
+            color: #71717a;
+        }
     </style>
 </head>
 <body>
@@ -1319,8 +1801,223 @@ export class Dashboard {
                     </div>
                 </div>
             </div>
+
+            <!-- Analytics Panel -->
+            <div class="card analytics-panel" style="margin-bottom:24px;">
+                <div class="analytics-header">
+                    <div class="card-title">Analytics & Export</div>
+                    <div class="export-buttons">
+                        <button class="btn btn-sm btn-outline" onclick="exportCSV()">Export CSV</button>
+                        <button class="btn btn-sm btn-outline" onclick="exportJSON()">Export JSON</button>
+                        <button class="btn btn-sm btn-primary" onclick="showAnalyticsModal()">Full Report</button>
+                    </div>
+                </div>
+
+                <div class="analytics-grid">
+                    <div class="analytics-section">
+                        <div class="section-title">Risk Metrics</div>
+                        <div class="metric-row">
+                            <span class="metric-label">Max Drawdown</span>
+                            <span class="metric-value negative" id="analyticsMaxDD">0.00%</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Sharpe Ratio</span>
+                            <span class="metric-value" id="analyticsSharpe">0.00</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Sortino Ratio</span>
+                            <span class="metric-value" id="analyticsSortino">0.00</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Recovery Factor</span>
+                            <span class="metric-value" id="analyticsRecovery">0.00</span>
+                        </div>
+                    </div>
+
+                    <div class="analytics-section">
+                        <div class="section-title">Trade Analysis</div>
+                        <div class="metric-row">
+                            <span class="metric-label">Expectancy</span>
+                            <span class="metric-value" id="analyticsExpectancy">$0.00</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Avg Hold Time</span>
+                            <span class="metric-value" id="analyticsHoldTime">0h</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Max Win Streak</span>
+                            <span class="metric-value positive" id="analyticsWinStreak">0</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Max Loss Streak</span>
+                            <span class="metric-value negative" id="analyticsLossStreak">0</span>
+                        </div>
+                    </div>
+
+                    <div class="analytics-section">
+                        <div class="section-title">Performance</div>
+                        <div class="metric-row">
+                            <span class="metric-label">ROI</span>
+                            <span class="metric-value" id="analyticsROI">0.00%</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Peak Equity</span>
+                            <span class="metric-value" id="analyticsPeakEquity">$0.00</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Calmar Ratio</span>
+                            <span class="metric-value" id="analyticsCalmar">0.00</span>
+                        </div>
+                        <div class="metric-row">
+                            <span class="metric-label">Long/Short Ratio</span>
+                            <span class="metric-value" id="analyticsLSRatio">-</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Daily Breakdown -->
+            <div class="card" style="margin-bottom:24px;">
+                <div class="card-title">Daily Performance</div>
+                <div style="max-height:200px;overflow-y:auto;">
+                    <table class="trades-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Trades</th>
+                                <th>Wins</th>
+                                <th>Losses</th>
+                                <th>Win Rate</th>
+                                <th>PnL</th>
+                            </tr>
+                        </thead>
+                        <tbody id="dailyStatsBody">
+                            <tr><td colspan="6" class="no-data">No daily data</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Backtest Panel -->
+            <div class="card backtest-panel" style="margin-bottom:24px;">
+                <div class="analytics-header">
+                    <div class="card-title">Strategy Backtester</div>
+                    <button class="btn btn-sm btn-primary" id="runBacktestBtn" onclick="runBacktest()">Run Backtest</button>
+                </div>
+
+                <div class="backtest-config">
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Days to Test</label>
+                            <input type="number" class="form-input" id="btDays" value="30" min="7" max="365">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Initial Equity ($)</label>
+                            <input type="number" class="form-input" id="btEquity" value="10000" min="100">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Leverage</label>
+                            <input type="number" class="form-input" id="btLeverage" value="3" min="1" max="50">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">R:R Ratio</label>
+                            <input type="number" class="form-input" id="btRR" value="1.5" min="0.5" max="5" step="0.1">
+                        </div>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label class="form-label">Supertrend Period</label>
+                            <input type="number" class="form-input" id="btStPeriod" value="10" min="5" max="30">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Supertrend Mult</label>
+                            <input type="number" class="form-input" id="btStMult" value="3" min="1" max="5" step="0.5">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">ADX Threshold</label>
+                            <input type="number" class="form-input" id="btAdx" value="20" min="10" max="40">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">SL ATR Mult</label>
+                            <input type="number" class="form-input" id="btSlMult" value="1.5" min="0.5" max="3" step="0.1">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Backtest Results -->
+                <div id="backtestResults" class="backtest-results" style="display:none;">
+                    <div class="section-title" style="margin-top:20px;">Backtest Results</div>
+                    <div class="backtest-summary">
+                        <div class="bt-stat">
+                            <span class="bt-label">Total PnL</span>
+                            <span class="bt-value" id="btTotalPnl">$0.00</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">ROI</span>
+                            <span class="bt-value" id="btROI">0.00%</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Win Rate</span>
+                            <span class="bt-value" id="btWinRate">0.00%</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Trades</span>
+                            <span class="bt-value" id="btTrades">0</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Profit Factor</span>
+                            <span class="bt-value" id="btPF">0.00</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Max Drawdown</span>
+                            <span class="bt-value negative" id="btMaxDD">0.00%</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Sharpe Ratio</span>
+                            <span class="bt-value" id="btSharpe">0.00</span>
+                        </div>
+                        <div class="bt-stat">
+                            <span class="bt-label">Final Equity</span>
+                            <span class="bt-value" id="btFinalEquity">$0.00</span>
+                        </div>
+                    </div>
+
+                    <div class="section-title" style="margin-top:16px;">Sample Trades</div>
+                    <div style="max-height:150px;overflow-y:auto;">
+                        <table class="trades-table">
+                            <thead>
+                                <tr>
+                                    <th>Side</th>
+                                    <th>Entry</th>
+                                    <th>Exit</th>
+                                    <th>PnL</th>
+                                    <th>Exit Reason</th>
+                                </tr>
+                            </thead>
+                            <tbody id="btTradesBody">
+                                <tr><td colspan="5" class="no-data">No backtest run yet</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
         </div>
         <div class="footer">Auto-refresh every 3 seconds | <span id="lastUpdate">-</span></div>
+
+        <!-- Analytics Modal -->
+        <div id="analyticsModal" class="modal hidden">
+            <div class="modal-overlay" onclick="hideAnalyticsModal()"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Performance Report</h2>
+                    <button class="modal-close" onclick="hideAnalyticsModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="analyticsModalContent">
+                    Loading...
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
@@ -1718,6 +2415,351 @@ export class Dashboard {
             }
 
             document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+
+            // Also fetch analytics and daily stats
+            fetchAnalytics();
+            fetchDailyStats();
+        }
+
+        // Export functions
+        function exportCSV() {
+            window.location.href = '/api/export/csv';
+        }
+
+        function exportJSON() {
+            window.location.href = '/api/export/json';
+        }
+
+        // Analytics functions
+        async function fetchAnalytics() {
+            try {
+                const res = await fetch('/api/analytics/report');
+                const report = await res.json();
+                updateAnalyticsPanel(report);
+            } catch (e) {
+                console.error('Failed to fetch analytics:', e);
+            }
+        }
+
+        function updateAnalyticsPanel(report) {
+            if (!report || !report.metrics) return;
+            const m = report.metrics;
+
+            // Risk Metrics
+            document.getElementById('analyticsMaxDD').textContent = (m.maxDrawdownPercent || 0).toFixed(2) + '%';
+            document.getElementById('analyticsSharpe').textContent = (m.sharpeRatio || 0).toFixed(2);
+            document.getElementById('analyticsSortino').textContent = (m.sortinoRatio || 0).toFixed(2);
+            document.getElementById('analyticsRecovery').textContent = (m.recoveryFactor || 0).toFixed(2);
+
+            // Trade Analysis
+            document.getElementById('analyticsExpectancy').textContent = '$' + (m.expectancy || 0).toFixed(2);
+            const holdHours = ((m.avgHoldTime || 0) / (1000 * 60 * 60)).toFixed(1);
+            document.getElementById('analyticsHoldTime').textContent = holdHours + 'h';
+            document.getElementById('analyticsWinStreak').textContent = m.maxConsecutiveWins || 0;
+            document.getElementById('analyticsLossStreak').textContent = m.maxConsecutiveLosses || 0;
+
+            // Performance
+            const roi = document.getElementById('analyticsROI');
+            roi.textContent = (m.returnOnInvestment || 0).toFixed(2) + '%';
+            roi.className = 'metric-value ' + ((m.returnOnInvestment || 0) >= 0 ? 'positive' : 'negative');
+
+            document.getElementById('analyticsPeakEquity').textContent = '$' + (m.peakEquity || 0).toLocaleString(undefined, {minimumFractionDigits: 2});
+            document.getElementById('analyticsCalmar').textContent = (m.calmarRatio || 0).toFixed(2);
+
+            // Long/Short ratio
+            const longTrades = report.summary?.longTrades || 0;
+            const shortTrades = report.summary?.shortTrades || 0;
+            if (longTrades + shortTrades > 0) {
+                document.getElementById('analyticsLSRatio').textContent = longTrades + '/' + shortTrades;
+            }
+        }
+
+        async function fetchDailyStats() {
+            try {
+                const res = await fetch('/api/analytics/daily');
+                const stats = await res.json();
+                updateDailyTable(stats);
+            } catch (e) {
+                console.error('Failed to fetch daily stats:', e);
+            }
+        }
+
+        function updateDailyTable(stats) {
+            const tbody = document.getElementById('dailyStatsBody');
+            if (!stats || stats.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No daily data</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = stats.slice(-10).reverse().map(day => \`
+                <tr>
+                    <td>\${day.date}</td>
+                    <td>\${day.trades}</td>
+                    <td class="positive">\${day.wins}</td>
+                    <td class="negative">\${day.losses}</td>
+                    <td>\${day.winRate.toFixed(1)}%</td>
+                    <td class="\${day.pnl >= 0 ? 'positive' : 'negative'}">\${day.pnl >= 0 ? '+' : ''}\$\${day.pnl.toFixed(2)}</td>
+                </tr>
+            \`).join('');
+        }
+
+        // Modal functions
+        function showAnalyticsModal() {
+            document.getElementById('analyticsModal').classList.remove('hidden');
+            loadFullReport();
+        }
+
+        function hideAnalyticsModal() {
+            document.getElementById('analyticsModal').classList.add('hidden');
+        }
+
+        async function loadFullReport() {
+            const content = document.getElementById('analyticsModalContent');
+            content.innerHTML = '<div class="no-data">Loading report...</div>';
+
+            try {
+                const res = await fetch('/api/analytics/report');
+                const report = await res.json();
+                renderFullReport(report);
+            } catch (e) {
+                content.innerHTML = '<div class="no-data">Failed to load report</div>';
+            }
+        }
+
+        function renderFullReport(report) {
+            if (!report) return;
+            const m = report.metrics || {};
+            const s = report.summary || {};
+
+            const content = document.getElementById('analyticsModalContent');
+            content.innerHTML = \`
+                <div class="report-section">
+                    <div class="report-section-title">Summary</div>
+                    <div class="report-grid">
+                        <div class="report-item">
+                            <span class="report-item-label">Period</span>
+                            <span class="report-item-value">\${report.period || 'All Time'}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Generated</span>
+                            <span class="report-item-value">\${new Date(report.generatedAt).toLocaleString()}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Initial Equity</span>
+                            <span class="report-item-value">$\${(s.initialEquity || 0).toLocaleString()}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Final Equity</span>
+                            <span class="report-item-value">$\${(m.finalEquity || 0).toLocaleString()}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section">
+                    <div class="report-section-title">Trade Statistics</div>
+                    <div class="report-grid">
+                        <div class="report-item">
+                            <span class="report-item-label">Total Trades</span>
+                            <span class="report-item-value">\${m.totalTrades || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Win Rate</span>
+                            <span class="report-item-value">\${(m.winRate || 0).toFixed(1)}%</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Winning Trades</span>
+                            <span class="report-item-value positive">\${m.winningTrades || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Losing Trades</span>
+                            <span class="report-item-value negative">\${m.losingTrades || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Long Trades</span>
+                            <span class="report-item-value">\${s.longTrades || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Short Trades</span>
+                            <span class="report-item-value">\${s.shortTrades || 0}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section">
+                    <div class="report-section-title">PnL Analysis</div>
+                    <div class="report-grid">
+                        <div class="report-item">
+                            <span class="report-item-label">Total PnL</span>
+                            <span class="report-item-value \${(m.totalPnl || 0) >= 0 ? 'positive' : 'negative'}">\${(m.totalPnl || 0) >= 0 ? '+' : ''}$\${(m.totalPnl || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">ROI</span>
+                            <span class="report-item-value \${(m.returnOnInvestment || 0) >= 0 ? 'positive' : 'negative'}">\${(m.returnOnInvestment || 0).toFixed(2)}%</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Average Win</span>
+                            <span class="report-item-value positive">+$\${(m.avgWin || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Average Loss</span>
+                            <span class="report-item-value negative">-$\${(m.avgLoss || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Largest Win</span>
+                            <span class="report-item-value positive">+$\${(m.largestWin || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Largest Loss</span>
+                            <span class="report-item-value negative">-$\${Math.abs(m.largestLoss || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Profit Factor</span>
+                            <span class="report-item-value">\${m.profitFactor === Infinity ? '∞' : (m.profitFactor || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Expectancy</span>
+                            <span class="report-item-value">$\${(m.expectancy || 0).toFixed(2)}/trade</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section">
+                    <div class="report-section-title">Risk Metrics</div>
+                    <div class="report-grid">
+                        <div class="report-item">
+                            <span class="report-item-label">Max Drawdown</span>
+                            <span class="report-item-value negative">$\${(m.maxDrawdown || 0).toFixed(2)} (\${(m.maxDrawdownPercent || 0).toFixed(2)}%)</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Peak Equity</span>
+                            <span class="report-item-value">$\${(m.peakEquity || 0).toLocaleString()}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Sharpe Ratio</span>
+                            <span class="report-item-value">\${(m.sharpeRatio || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Sortino Ratio</span>
+                            <span class="report-item-value">\${(m.sortinoRatio || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Calmar Ratio</span>
+                            <span class="report-item-value">\${(m.calmarRatio || 0).toFixed(2)}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Recovery Factor</span>
+                            <span class="report-item-value">\${(m.recoveryFactor || 0).toFixed(2)}</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="report-section">
+                    <div class="report-section-title">Trade Characteristics</div>
+                    <div class="report-grid">
+                        <div class="report-item">
+                            <span class="report-item-label">Avg Hold Time</span>
+                            <span class="report-item-value">\${(m.avgTradeDuration || 0).toFixed(1)} hours</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Max Win Streak</span>
+                            <span class="report-item-value positive">\${m.maxConsecutiveWins || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Max Loss Streak</span>
+                            <span class="report-item-value negative">\${m.maxConsecutiveLosses || 0}</span>
+                        </div>
+                        <div class="report-item">
+                            <span class="report-item-label">Avg Trade PnL</span>
+                            <span class="report-item-value">$\${((m.totalPnl || 0) / (m.totalTrades || 1)).toFixed(2)}</span>
+                        </div>
+                    </div>
+                </div>
+            \`;
+        }
+
+        // Close modal on escape key
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') hideAnalyticsModal();
+        });
+
+        // Backtest functions
+        async function runBacktest() {
+            const btn = document.getElementById('runBacktestBtn');
+            const resultsDiv = document.getElementById('backtestResults');
+
+            btn.disabled = true;
+            btn.textContent = 'Running...';
+            resultsDiv.style.display = 'block';
+            resultsDiv.innerHTML = '<div class="bt-loading">Running backtest... This may take a moment.</div>';
+
+            const config = {
+                days: parseInt(document.getElementById('btDays').value) || 30,
+                initialEquity: parseInt(document.getElementById('btEquity').value) || 10000,
+                leverage: parseInt(document.getElementById('btLeverage').value) || 3,
+                riskRewardRatio: parseFloat(document.getElementById('btRR').value) || 1.5,
+                supertrendPeriod: parseInt(document.getElementById('btStPeriod').value) || 10,
+                supertrendMultiplier: parseFloat(document.getElementById('btStMult').value) || 3,
+                adxThreshold: parseInt(document.getElementById('btAdx').value) || 20,
+                stopLossAtrMultiplier: parseFloat(document.getElementById('btSlMult').value) || 1.5
+            };
+
+            try {
+                const res = await fetch('/api/backtest', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+
+                const data = await res.json();
+
+                if (data.success) {
+                    displayBacktestResults(data.results, data.trades);
+                } else {
+                    resultsDiv.innerHTML = '<div class="bt-loading">Error: ' + data.message + '</div>';
+                }
+            } catch (e) {
+                resultsDiv.innerHTML = '<div class="bt-loading">Error: ' + e.message + '</div>';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Run Backtest';
+            }
+        }
+
+        function displayBacktestResults(results, trades) {
+            const resultsDiv = document.getElementById('backtestResults');
+            resultsDiv.style.display = 'block';
+
+            // Update summary stats
+            const pnlEl = document.getElementById('btTotalPnl');
+            pnlEl.textContent = (results.totalPnl >= 0 ? '+' : '') + '$' + results.totalPnl.toFixed(2);
+            pnlEl.className = 'bt-value ' + (results.totalPnl >= 0 ? 'positive' : 'negative');
+
+            const roiEl = document.getElementById('btROI');
+            roiEl.textContent = (results.totalPnlPercent >= 0 ? '+' : '') + results.totalPnlPercent.toFixed(2) + '%';
+            roiEl.className = 'bt-value ' + (results.totalPnlPercent >= 0 ? 'positive' : 'negative');
+
+            document.getElementById('btWinRate').textContent = results.winRate.toFixed(1) + '%';
+            document.getElementById('btTrades').textContent = results.totalTrades;
+            document.getElementById('btPF').textContent = results.profitFactor === Infinity ? '∞' : results.profitFactor.toFixed(2);
+            document.getElementById('btMaxDD').textContent = results.maxDrawdownPercent.toFixed(2) + '%';
+            document.getElementById('btSharpe').textContent = results.sharpeRatio.toFixed(2);
+            document.getElementById('btFinalEquity').textContent = '$' + results.finalEquity.toLocaleString();
+
+            // Update trades table
+            const tbody = document.getElementById('btTradesBody');
+            if (!trades || trades.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No trades in backtest</td></tr>';
+            } else {
+                tbody.innerHTML = trades.slice(-10).map(t => \`
+                    <tr>
+                        <td><span class="badge badge-\${t.side.toLowerCase()}">\${t.side}</span></td>
+                        <td>$\${t.entryPrice.toFixed(2)}</td>
+                        <td>$\${t.exitPrice.toFixed(2)}</td>
+                        <td class="\${t.pnl >= 0 ? 'positive' : 'negative'}">\${t.pnl >= 0 ? '+' : ''}$\${t.pnl.toFixed(2)}</td>
+                        <td>\${t.exitReason}</td>
+                    </tr>
+                \`).join('');
+            }
         }
     </script>
 </body>

@@ -285,7 +285,7 @@ export class Backtester {
 // SAMPLE DATA GENERATOR (for testing)
 // Replace with real historical data
 // ─────────────────────────────────────────────────────────────────────────
-function generateSampleData(days: number): Candle[] {
+export function generateSampleData(days: number): Candle[] {
     const candles: Candle[] = [];
     const candlesPerDay = 96; // 15m timeframe
     const totalCandles = days * candlesPerDay;

@@ -95,17 +95,27 @@ export interface Position {
 // TRADE RESULT
 // ─────────────────────────────────────────────────────────────────────────
 export interface TradeResult {
+    // Identification
+    id?: string;                   // Unique trade ID
+    // Core trade data
     side: 'LONG' | 'SHORT';
     entryPrice: number;
     exitPrice: number;
+    size?: number;                 // Position size (optional for backward compat)
     pnl: number;
     pnlPercent: number;
-    duration: number;
+    // Timing
+    entryTime?: number;            // Entry timestamp (optional for backward compat)
+    exitTime?: number;             // Exit timestamp (optional for backward compat)
+    duration: number;              // Duration in milliseconds
+    // Exit info
     exitReason: 'SL' | 'TP' | 'SIGNAL' | 'PARTIAL_TP' | 'FORCE_CLOSE';
+    // Costs
+    fees?: number;                 // Trading fees
     // Enhanced tracking
     strategy?: StrategyType;
     marketRegime?: MarketRegime;
-    partialTpLevel?: number;      // Which partial TP level was hit (1, 2, or 3)
+    partialTpLevel?: number;       // Which partial TP level was hit (1, 2, or 3)
 }
 
 // ─────────────────────────────────────────────────────────────────────────
