@@ -175,6 +175,7 @@ export interface RiskConfig {
     riskRewardRatio: number;      // Risk/Reward ratio (e.g., 1.5 = 1:1.5)
     stopLossAtrMultiplier: number; // SL = ATR * multiplier
     cooldownMinutes: number;      // Cooldown after loss
+    riskPerTrade?: number;        // Risk % per trade (default 1%)
     // Advanced features
     useTrailingStop?: boolean;    // Enable trailing stop loss
     trailingStopDistance?: number; // Distance in % from peak

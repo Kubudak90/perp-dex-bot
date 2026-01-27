@@ -5,6 +5,8 @@
 
 import { RiskConfig, BotState, Position, TradeResult } from '../types';
 import { Logger } from '../utils/logger';
+import { TradingValidator, Result, ok, err, ValidationError } from '../core/validation';
+import { ErrorCode, LIMITS } from '../core/constants';
 
 export class RiskManager {
     private config: RiskConfig;
@@ -16,47 +18,32 @@ export class RiskManager {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // CHECK IF NEW TRADE IS ALLOWED
+    // CHECK IF NEW TRADE IS ALLOWED (with Result pattern)
+    // ─────────────────────────────────────────────────────────────────────────
+    validateTradeEntry(state: BotState): Result<true> {
+        return TradingValidator.canEnterTrade(
+            state.equity,
+            state.dailyPnl,
+            state.dailyTrades,
+            this.config.maxDailyLoss,
+            this.config.maxDailyTrades,
+            state.lastLossTime,
+            this.config.cooldownMinutes,
+            state.position !== null
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // CHECK IF NEW TRADE IS ALLOWED (legacy - for backward compatibility)
     // ─────────────────────────────────────────────────────────────────────────
     canOpenPosition(state: BotState): { allowed: boolean; reason: string } {
+        const result = this.validateTradeEntry(state);
 
-        // Already has position
-        if (state.position !== null) {
-            return { allowed: false, reason: 'Position already open' };
+        if (result.success) {
+            return { allowed: true, reason: 'Trade allowed' };
         }
 
-        // Daily loss limit hit
-        const dailyLossPercent = (state.dailyPnl / state.equity) * 100;
-        if (dailyLossPercent <= -this.config.maxDailyLoss) {
-            return {
-                allowed: false,
-                reason: `Daily loss limit hit: ${dailyLossPercent.toFixed(2)}% (max: -${this.config.maxDailyLoss}%)`
-            };
-        }
-
-        // Daily trade limit hit
-        if (state.dailyTrades >= this.config.maxDailyTrades) {
-            return {
-                allowed: false,
-                reason: `Daily trade limit hit: ${state.dailyTrades}/${this.config.maxDailyTrades}`
-            };
-        }
-
-        // Cooldown after loss
-        if (state.lastLossTime > 0) {
-            const cooldownMs = this.config.cooldownMinutes * 60 * 1000;
-            const timeSinceLoss = Date.now() - state.lastLossTime;
-
-            if (timeSinceLoss < cooldownMs) {
-                const remainingMin = Math.ceil((cooldownMs - timeSinceLoss) / 60000);
-                return {
-                    allowed: false,
-                    reason: `Cooldown active: ${remainingMin} minutes remaining`
-                };
-            }
-        }
-
-        return { allowed: true, reason: 'Trade allowed' };
+        return { allowed: false, reason: result.error.message };
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -75,8 +62,9 @@ export class RiskManager {
         const maxPositionValue = equity * (this.config.maxPositionSize / 100) * leverage;
         const stopDistance = Math.abs(entryPrice - stopLossPrice);
 
-        // Risk 1% of equity per trade (adjustable)
-        const riskAmount = equity * 0.01;
+        // Risk % per trade from config (default 1%)
+        const riskPercent = this.config.riskPerTrade ?? 1;
+        const riskAmount = equity * (riskPercent / 100);
         const riskBasedSize = (riskAmount / stopDistance) * entryPrice;
 
         // Take the smaller of max position and risk-based size

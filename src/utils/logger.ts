@@ -66,9 +66,22 @@ export class Logger {
     /**
      * Trade level - trade execution logs
      */
-    trade(side: 'LONG' | 'SHORT' | 'CLOSE', price: number, details: string): void {
-        const emoji = side === 'LONG' ? '🟢' : side === 'SHORT' ? '🔴' : '⚪';
-        const color = side === 'LONG' ? '\x1b[32m' : side === 'SHORT' ? '\x1b[31m' : '\x1b[37m';
+    trade(side: 'LONG' | 'SHORT' | 'CLOSE' | 'PARTIAL_CLOSE', price: number, details: string): void {
+        const emojiMap: Record<string, string> = {
+            'LONG': '🟢',
+            'SHORT': '🔴',
+            'CLOSE': '⚪',
+            'PARTIAL_CLOSE': '🟡'
+        };
+        const colorMap: Record<string, string> = {
+            'LONG': '\x1b[32m',
+            'SHORT': '\x1b[31m',
+            'CLOSE': '\x1b[37m',
+            'PARTIAL_CLOSE': '\x1b[33m'
+        };
+
+        const emoji = emojiMap[side] || '⚪';
+        const color = colorMap[side] || '\x1b[37m';
 
         console.log(`${color}${this.formatMessage('TRADE', `${emoji} ${side} @ $${price.toFixed(2)} | ${details}`)}\x1b[0m`);
     }

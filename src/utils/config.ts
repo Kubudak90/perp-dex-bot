@@ -190,6 +190,7 @@ export function loadConfigFromEnv(defaults?: Partial<BotConfig>): BotConfig {
             riskRewardRatio: getEnvNumber('RISK_REWARD_RATIO', defaults?.risk?.riskRewardRatio || 1.5),
             stopLossAtrMultiplier: getEnvNumber('STOP_LOSS_ATR_MULTIPLIER', defaults?.risk?.stopLossAtrMultiplier || 1.5),
             cooldownMinutes: getEnvInt('COOLDOWN_MINUTES', defaults?.risk?.cooldownMinutes || 30),
+            riskPerTrade: getEnvNumber('RISK_PER_TRADE', defaults?.risk?.riskPerTrade || 1),
             // Phase 2 Advanced Risk (optional)
             useTrailingStop: getEnvBoolean('USE_TRAILING_STOP', defaults?.risk?.useTrailingStop ?? false),
             trailingStopDistance: getEnvNumber('TRAILING_STOP_DISTANCE', defaults?.risk?.trailingStopDistance),
@@ -266,39 +267,15 @@ export function loadConfigFromEnv(defaults?: Partial<BotConfig>): BotConfig {
 
 // ─────────────────────────────────────────────────────────────────────────
 // VALIDATE MODE AND CREDENTIALS
+// Currently only paper trading is supported
+// To add live trading, implement a connector extending BaseExchangeConnector
 // ─────────────────────────────────────────────────────────────────────────
-export function validateMode(): { mode: 'paper' | 'live'; config: any } {
+export function validateMode(): { mode: 'paper' | 'live'; config: { initialBalance: number } } {
     const mode = process.env.MODE || 'paper';
 
-    if (mode !== 'paper' && mode !== 'live') {
-        throw new ValidationError(`Invalid MODE: ${mode}. Must be 'paper' or 'live'`, 'MODE');
-    }
-
+    // Live mode is not yet implemented - will fall back to paper
     if (mode === 'live') {
-        const privateKey = process.env.PRIVATE_KEY;
-        const walletAddress = process.env.WALLET_ADDRESS;
-
-        if (!privateKey || !walletAddress) {
-            throw new ConfigurationError(
-                'PRIVATE_KEY and WALLET_ADDRESS are required for live mode'
-            );
-        }
-
-        if (!walletAddress.startsWith('0x') || walletAddress.length !== 42) {
-            throw new ValidationError(
-                'WALLET_ADDRESS must be a valid Ethereum address (0x...)',
-                'WALLET_ADDRESS'
-            );
-        }
-
-        return {
-            mode: 'live',
-            config: {
-                privateKey,
-                walletAddress,
-                testnet: getEnvBoolean('TESTNET', false)
-            }
-        };
+        console.warn('Live trading not yet implemented. Falling back to paper mode.');
     }
 
     // Paper mode
@@ -312,7 +289,7 @@ export function validateMode(): { mode: 'paper' | 'live'; config: any } {
     }
 
     return {
-        mode: 'paper',
+        mode: mode === 'live' ? 'live' : 'paper',
         config: { initialBalance: paperBalance }
     };
 }

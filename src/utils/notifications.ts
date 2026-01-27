@@ -136,7 +136,7 @@ export class NotificationService {
         });
     }
 
-    async notifyRiskAlert(message: string, severity: 'warning' | 'error' = 'warning'): Promise<void> {
+    async notifyRiskAlert(message: string, severity: 'info' | 'warning' | 'error' = 'warning'): Promise<void> {
         await this.sendAlert({
             type: 'risk',
             title: '⚠️ Risk Alert',
