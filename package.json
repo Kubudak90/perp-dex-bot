@@ -18,13 +18,13 @@
         "clean": "rimraf dist",
         "demo:notifications": "ts-node examples/notification-demo.ts",
         "demo:database": "ts-node examples/database-demo.ts",
-        "demo:analytics": "ts-node examples/analytics-demo.ts"
+        "demo:analytics": "ts-node examples/analytics-demo.ts",
+        "demo:dashboard": "ts-node examples/dashboard-demo.ts"
     },
     "keywords": [
         "trading-bot",
         "perpetual",
         "dex",
-        "hyperliquid",
         "supertrend",
         "crypto",
         "automated-trading"

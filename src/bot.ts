@@ -13,6 +13,7 @@ import { IExchange } from './utils/exchange';
 import { NotificationService } from './utils/notifications';
 import { DatabaseService } from './utils/database';
 import { AnalyticsService } from './utils/analytics';
+import { Dashboard } from './utils/dashboard';
 
 export interface BotServices {
     notifications?: NotificationService;
@@ -34,6 +35,10 @@ export class PerpBot {
     private databaseService?: DatabaseService;
     private analyticsService?: AnalyticsService;
 
+    // Dashboard
+    private dashboard: Dashboard;
+    private dashboardEnabled: boolean = false;
+
     // Daily reset tracking
     private lastResetDay: number = -1;
 
@@ -46,6 +51,7 @@ export class PerpBot {
         this.logger = new Logger('PerpBot');
         this.strategy = new TradingStrategy(config);
         this.riskManager = new RiskManager(config.risk, this.logger);
+        this.dashboard = new Dashboard(config);
 
         // Optional services
         this.notificationService = services?.notifications;
@@ -226,8 +232,14 @@ export class PerpBot {
         // 5. Execute signal
         await this.executeSignal(signal, currentPrice, indicators.atr, indicators.atrPercentile);
 
-        // Debug output (every tick)
-        this.logger.debug(this.strategy.getStateDebug(indicators));
+        // Update dashboard
+        this.dashboard.updateIndicators(indicators, currentPrice);
+        if (this.dashboardEnabled) {
+            this.dashboard.render(this.state);
+        } else {
+            // Debug output (every tick)
+            this.logger.debug(this.strategy.getStateDebug(indicators));
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -556,5 +568,30 @@ export class PerpBot {
 
     getRiskStats(): string {
         return this.riskManager.getRiskStats(this.state);
+    }
+
+    // Dashboard control
+    enableDashboard(): void {
+        this.dashboardEnabled = true;
+        this.logger.info('Dashboard enabled');
+    }
+
+    disableDashboard(): void {
+        this.dashboardEnabled = false;
+        this.logger.info('Dashboard disabled');
+    }
+
+    isDashboardEnabled(): boolean {
+        return this.dashboardEnabled;
+    }
+
+    // Render dashboard once (for quick stats)
+    renderDashboard(): void {
+        this.dashboard.render(this.state);
+    }
+
+    // Get quick stats string
+    getQuickStats(): string {
+        return Dashboard.renderQuickStats(this.state, this.config);
     }
 }
